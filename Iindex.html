@@ -1,0 +1,2318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CampusLoci — Connect. Trade. Share.</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+
+<!-- ═══════════════════════ FIREBASE ═══════════════════════ -->
+<script type="module">
+import { initializeApp }   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, limit,
+         doc, updateDoc, deleteDoc, setDoc, getDoc,
+         serverTimestamp, where, arrayUnion, arrayRemove, increment }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const cfg = {
+     apiKey:"AIzaSyDa57mJ3OdFCOa0ca-MyPf8C1Fb2JnE7BY",
+    authDomain:"camploci.firebaseapp.com",
+    projectId:"camploci",
+    storageBucket:"camploci.firebasestorage.app",
+    messagingSenderId:"466580592594",
+    appId:"1:466580592594:web:692ffae0a6787e5be61a0b"
+};
+const app  = initializeApp(cfg);
+const auth = getAuth(app);
+const db   = getFirestore(app);
+
+const postsCol = collection(db,'posts'), bizCol = collection(db,'businesses'),
+      usersCol = collection(db,'users'), chatsCol = collection(db,'chats');
+
+window._auth = {
+    register:      (e,p) => createUserWithEmailAndPassword(auth,e,p),
+    login:         (e,p) => signInWithEmailAndPassword(auth,e,p),
+    logout:        ()    => signOut(auth),
+    onChange:      (cb)  => onAuthStateChanged(auth, cb),
+    resetPassword: (e)   => sendPasswordResetEmail(auth, e),
+};
+
+window._db = {
+    /* ── Users ── */
+    createProfile: (uid,d) => setDoc(doc(usersCol,uid), d),
+    getProfile:    (uid)   => getDoc(doc(usersCol,uid)).then(s => s.exists() ? {uid:s.id,...s.data()} : null),
+    updateProfile: (uid,d) => updateDoc(doc(usersCol,uid), d),
+    listenProfile: (uid,cb)=> onSnapshot(doc(usersCol,uid), s => cb(s.exists()?{uid:s.id,...s.data()}:null)),
+
+    /* ── Follow ── */
+    follow: async (me,them) => {
+        await updateDoc(doc(usersCol,me),   {following:arrayUnion(them),  followingCount:increment(1)});
+        await updateDoc(doc(usersCol,them), {followers:arrayUnion(me),    followersCount:increment(1)});
+    },
+    unfollow: async (me,them) => {
+        await updateDoc(doc(usersCol,me),   {following:arrayRemove(them), followingCount:increment(-1)});
+        await updateDoc(doc(usersCol,them), {followers:arrayRemove(me),   followersCount:increment(-1)});
+    },
+
+    /* ── Posts ── */
+    addPost:    (d)   => addDoc(postsCol, {...d, createdAt:serverTimestamp()}),
+    deletePost: (id)  => deleteDoc(doc(postsCol, id)),
+    likePost:   (id,uid,liked) => updateDoc(doc(postsCol,id),{
+        likedBy: liked ? arrayRemove(uid) : arrayUnion(uid),
+        likeCount: liked ? increment(-1) : increment(1)
+    }),
+    listenPosts: (cb) => onSnapshot(
+        query(postsCol, orderBy('createdAt','desc'), limit(80)),
+        s => cb(s.docs.map(d=>({fid:d.id,...d.data()})))
+    ),
+
+    /* ── Comments ── */
+    addComment: (pid,d) => addDoc(collection(db,'posts',pid,'comments'),{...d,createdAt:serverTimestamp()}),
+    listenComments: (pid,cb) => onSnapshot(
+        query(collection(db,'posts',pid,'comments'), orderBy('createdAt','asc')),
+        s => cb(s.docs.map(d=>({id:d.id,...d.data()})))
+    ),
+    incCommentCount: (pid) => updateDoc(doc(postsCol,pid),{commentCount:increment(1)}),
+
+    /* ── Businesses ── */
+    addBusiness:    (d)  => addDoc(bizCol, {...d, createdAt:serverTimestamp()}),
+    deleteBusiness: (id) => deleteDoc(doc(bizCol, id)),
+    listenBusinesses: (cb) => onSnapshot(
+        query(bizCol, orderBy('createdAt','desc')),
+        s => cb(s.docs.map(d=>({fid:d.id,...d.data()})))
+    ),
+
+    /* ── Chats ── */
+    getOrCreateUserChat: async (uid1,name1,uid2,name2) => {
+        const cid = [uid1,uid2].sort().join('__');
+        const ref = doc(chatsCol,cid);
+        if (!(await getDoc(ref)).exists())
+            await setDoc(ref,{type:'user', participants:[uid1,uid2],
+                names:{[uid1]:name1,[uid2]:name2}, lastMessage:'', lastUpdated:serverTimestamp()});
+        return cid;
+    },
+    getOrCreateBizChat: async (custId,custName,bizId,bizName,ownerId,ownerName) => {
+        const cid = `biz__${custId}__${bizId}`;
+        const ref = doc(chatsCol,cid);
+        if (!(await getDoc(ref)).exists())
+            await setDoc(ref,{type:'business', participants:[custId,ownerId],
+                names:{[custId]:custName,[ownerId]:ownerName}, bizId, bizName,
+                lastMessage:'', lastUpdated:serverTimestamp()});
+        return cid;
+    },
+    sendMessage: async (cid,sid,sname,text) => {
+        await addDoc(collection(db,'chats',cid,'messages'),{senderId:sid,senderName:sname,text,createdAt:serverTimestamp()});
+        await updateDoc(doc(chatsCol,cid),{lastMessage:text,lastUpdated:serverTimestamp()});
+    },
+    listenMessages: (cid,cb) => onSnapshot(
+        query(collection(db,'chats',cid,'messages'), orderBy('createdAt','asc')),
+        s => cb(s.docs.map(d=>({id:d.id,...d.data()})))
+    ),
+    /* No composite index needed — sort client-side */
+    listenInbox: (uid,cb) => onSnapshot(
+        query(chatsCol, where('participants','array-contains',uid)),
+        s => {
+            const items = s.docs.map(d=>({id:d.id,...d.data()}));
+            items.sort((a,b)=>(b.lastUpdated?.toMillis?.()??0)-(a.lastUpdated?.toMillis?.()??0));
+            cb(items);
+        }
+    ),
+};
+window.dispatchEvent(new Event('firebase-ready'));
+</script>
+
+<style>
+:root{
+    --blue:#2563eb;--blue-dk:#1d4ed8;--blue-deep:#1e3a8a;
+    --blue-lt:#dbeafe;--blue-pl:#eff6ff;
+    --pink:#ec4899;--pink-dk:#db2777;--pink-lt:#fce7f3;--pink-pl:#fff5fb;
+    --ink:#0f172a;--ink2:#334155;--muted:#94a3b8;
+    --surf:#ffffff;--surf2:#f8fafc;--brd:#e2e8f0;
+    --r:12px;--rlg:20px;
+    --shsm:0 1px 4px rgba(0,0,0,.07);
+    --shmd:0 4px 20px rgba(37,99,235,.13);
+    --shlg:0 12px 40px rgba(37,99,235,.18);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--surf2);color:var(--ink);min-height:100vh}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-thumb{background:var(--brd);border-radius:99px}
+
+/* ── LOADER ── */
+#loader{
+    position:fixed;inset:0;z-index:3000;
+    background:linear-gradient(135deg,var(--blue-deep),var(--blue) 55%,var(--pink-dk));
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;
+    transition:opacity .45s ease;
+}
+.ld-logo{font-family:'Syne',sans-serif;font-size:2.6rem;font-weight:800;color:#fff;letter-spacing:-1px}
+.ld-logo span{background:linear-gradient(90deg,#fce7f3,var(--pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.ld-bar{width:150px;height:3px;background:rgba(255,255,255,.2);border-radius:99px;overflow:hidden}
+.ld-bar::after{content:'';display:block;height:100%;background:#fff;animation:ldanim 2s ease forwards}
+@keyframes ldanim{from{width:0}to{width:100%}}
+
+/* ── AUTH SCREEN ── */
+#authScreen{
+    min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(135deg,var(--blue-deep) 0%,var(--blue) 55%,#a21caf 100%);
+    padding:20px;
+}
+.auth-wrap{
+    background:var(--surf);border-radius:24px;padding:40px 36px;
+    width:100%;max-width:420px;box-shadow:0 24px 60px rgba(0,0,0,.25);
+}
+.auth-logo{font-family:'Syne',sans-serif;font-size:1.8rem;font-weight:800;text-align:center;margin-bottom:6px}
+.auth-logo span{background:linear-gradient(90deg,var(--blue),var(--pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.auth-sub{text-align:center;color:var(--muted);font-size:.85rem;margin-bottom:26px}
+.auth-tabs{display:flex;background:var(--surf2);border-radius:10px;padding:4px;gap:4px;margin-bottom:24px}
+.auth-tabs button{
+    flex:1;padding:9px;border-radius:8px;border:none;cursor:pointer;
+    font-family:'Syne',sans-serif;font-size:.88rem;font-weight:700;
+    color:var(--muted);background:transparent;transition:all .2s;
+}
+.auth-tabs button.active{background:var(--surf);color:var(--ink);box-shadow:var(--shsm)}
+.auth-form{display:flex;flex-direction:column;gap:12px}
+.auth-form input{
+    padding:12px 14px;border:2px solid var(--brd);border-radius:10px;
+    font-family:'Plus Jakarta Sans',sans-serif;font-size:.95rem;outline:none;transition:border-color .2s;
+}
+.auth-form input:focus{border-color:var(--blue)}
+.auth-btn{
+    padding:13px;border:none;border-radius:10px;cursor:pointer;
+    background:linear-gradient(135deg,var(--blue),var(--pink));
+    color:#fff;font-family:'Syne',sans-serif;font-size:.95rem;font-weight:700;
+    transition:opacity .2s;margin-top:4px;
+}
+.auth-btn:hover{opacity:.88}
+.auth-btn:disabled{opacity:.6;cursor:not-allowed}
+.auth-err{color:#ef4444;font-size:.82rem;min-height:18px;text-align:center}
+.auth-ok{color:#16a34a;font-size:.82rem;min-height:18px;text-align:center}
+.auth-link{
+    text-align:center;font-size:.82rem;color:var(--muted);margin-top:2px;
+}
+.auth-link button{
+    background:none;border:none;cursor:pointer;
+    color:var(--blue);font-size:.82rem;font-family:'Plus Jakarta Sans',sans-serif;
+    text-decoration:underline;padding:0;transition:color .2s;
+}
+.auth-link button:hover{color:var(--blue-dk)}
+
+/* ── HEADER ── */
+header{
+    background:linear-gradient(135deg,var(--blue-deep),var(--blue) 65%,#3b6fd4);
+    padding:0 24px;display:flex;align-items:center;justify-content:space-between;
+    height:62px;position:sticky;top:0;z-index:200;
+    box-shadow:0 2px 16px rgba(30,58,138,.3);gap:12px;
+}
+.h-left{display:flex;align-items:center;gap:14px;min-width:0}
+.logo{font-family:'Syne',sans-serif;font-size:1.35rem;font-weight:800;color:#fff;letter-spacing:-.5px;cursor:pointer;white-space:nowrap}
+.logo span{background:linear-gradient(90deg,#fce7f3,var(--pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.h-inst select{
+    background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);
+    color:rgba(255,255,255,.9);padding:7px 11px;border-radius:8px;
+    font-family:'Plus Jakarta Sans',sans-serif;font-size:.8rem;cursor:pointer;outline:none;
+    max-width:200px;
+}
+.h-inst select option{background:#1e3a8a;color:#fff}
+.h-right{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.icon-btn{
+    background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.22);
+    color:#fff;width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    cursor:pointer;transition:background .2s;position:relative;flex-shrink:0;
+}
+.icon-btn:hover{background:rgba(255,255,255,.24)}
+.ibadge{
+    position:absolute;top:-3px;right:-3px;background:var(--pink);color:#fff;
+    font-size:.6rem;font-weight:700;min-width:16px;height:16px;border-radius:99px;
+    display:none;align-items:center;justify-content:center;border:2px solid var(--blue-deep);
+}
+.user-pill{
+    display:flex;align-items:center;gap:8px;
+    background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);
+    border-radius:99px;padding:4px 12px 4px 4px;cursor:pointer;transition:background .2s;
+}
+.user-pill:hover{background:rgba(255,255,255,.22)}
+.h-av{
+    width:30px;height:30px;border-radius:50%;overflow:hidden;
+    background:linear-gradient(135deg,var(--pink),var(--blue));
+    display:flex;align-items:center;justify-content:center;
+    font-family:'Syne',sans-serif;font-weight:700;font-size:.8rem;color:#fff;flex-shrink:0;
+}
+.h-av img{width:100%;height:100%;object-fit:cover}
+.h-uname{color:#fff;font-size:.82rem;font-weight:600;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.logout-btn{
+    background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18);
+    color:rgba(255,255,255,.85);padding:6px 12px;border-radius:8px;font-size:.78rem;
+    cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;white-space:nowrap;transition:background .2s;
+}
+.logout-btn:hover{background:rgba(255,255,255,.2)}
+
+/* ── MAIN NAV ── */
+.main-nav{
+    background:var(--surf);border-bottom:1px solid var(--brd);
+    display:flex;padding:0 24px;overflow-x:auto;
+    position:sticky;top:62px;z-index:199;
+    box-shadow:0 2px 8px rgba(15,23,42,.06);
+}
+.main-nav::-webkit-scrollbar{height:0}
+.nav-btn{
+    font-family:'Syne',sans-serif;font-size:.88rem;font-weight:700;
+    padding:0 16px;height:48px;border:none;background:none;cursor:pointer;
+    color:var(--muted);position:relative;transition:color .2s;white-space:nowrap;
+}
+.nav-btn.active{color:var(--blue)}
+.nav-btn.active::after{
+    content:'';position:absolute;bottom:0;left:0;right:0;height:3px;
+    background:linear-gradient(90deg,var(--blue),var(--pink));border-radius:3px 3px 0 0;
+}
+
+/* ── PAGE ── */
+.page{max-width:1160px;margin:0 auto;padding:26px 20px}
+.hidden{display:none!important}
+
+/* ── MKT TABS ── */
+.mkt-tabs{display:flex;gap:7px;margin-bottom:22px}
+.mkt-tab{
+    font-family:'Syne',sans-serif;font-size:.83rem;font-weight:700;
+    padding:8px 16px;border-radius:9px;cursor:pointer;
+    border:2px solid var(--brd);background:var(--surf);color:var(--muted);transition:all .2s;
+}
+.mkt-tab.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+
+/* ── SEARCH + PILLS ── */
+.srch{position:relative;margin-bottom:18px}
+.srch input{
+    width:100%;padding:12px 16px 12px 46px;border:2px solid var(--brd);border-radius:var(--r);
+    font-family:'Plus Jakarta Sans',sans-serif;font-size:.92rem;background:var(--surf);outline:none;transition:border-color .2s;
+}
+.srch input:focus{border-color:var(--blue)}
+.srch .si{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
+.pills{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px}
+.pill{
+    padding:6px 14px;border-radius:99px;border:2px solid var(--brd);background:var(--surf);
+    font-size:.8rem;font-weight:500;cursor:pointer;color:var(--ink2);transition:all .2s;white-space:nowrap;
+}
+.pill:hover{border-color:var(--blue);color:var(--blue)}
+.pill.active{background:linear-gradient(135deg,var(--blue),#3b82f6);border-color:var(--blue);color:#fff}
+
+/* ── BUSINESS CARD ── */
+.biz-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(295px,1fr));gap:16px}
+.biz-card{
+    background:var(--surf);border:1px solid var(--brd);border-radius:var(--rlg);
+    overflow:hidden;transition:transform .2s,box-shadow .2s;
+}
+.biz-card:hover{transform:translateY(-4px);box-shadow:var(--shlg)}
+.biz-card .stripe{height:4px;background:linear-gradient(90deg,var(--blue),var(--pink))}
+.biz-card img.ci{width:100%;height:165px;object-fit:cover}
+.biz-card .cb{padding:18px}
+.biz-card h3{font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;margin-bottom:2px}
+.biz-own{
+    color:var(--muted);font-size:.8rem;margin-bottom:9px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:4px;
+}
+.biz-own:hover{color:var(--blue)}
+.ctag{display:inline-block;padding:3px 10px;background:var(--blue-lt);color:var(--blue);border-radius:99px;font-size:.73rem;font-weight:600;margin-bottom:9px}
+.biz-desc{font-size:.86rem;color:var(--ink2);line-height:1.6;margin-bottom:12px}
+.biz-meta{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+.bm-row{display:flex;align-items:flex-start;gap:6px;font-size:.8rem;color:var(--ink2)}
+.bm-row .mi{color:var(--blue);flex-shrink:0;margin-top:1px}
+.pval{font-weight:700;color:var(--blue)}
+.stars{display:flex;align-items:center;gap:4px;font-size:.8rem;margin-bottom:12px}
+.stars svg{fill:#f59e0b;color:#f59e0b}
+.biz-actions{display:flex;gap:8px}
+.msg-btn{
+    flex:1;display:flex;align-items:center;justify-content:center;gap:6px;
+    padding:10px;border-radius:var(--r);border:none;cursor:pointer;
+    background:linear-gradient(135deg,var(--blue),var(--pink));
+    color:#fff;font-family:'Syne',sans-serif;font-weight:700;font-size:.82rem;transition:opacity .2s;
+}
+.msg-btn:hover{opacity:.88}
+.del-btn{
+    padding:10px 12px;border-radius:var(--r);border:1px solid #fecaca;
+    background:#fff5f5;color:#ef4444;cursor:pointer;font-size:.82rem;transition:all .2s;
+}
+.del-btn:hover{background:#fef2f2;border-color:#f87171}
+
+/* ── FORM CARD ── */
+.form-card{background:var(--surf);border:1px solid var(--brd);border-radius:var(--rlg);padding:30px}
+.form-card h2{font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;margin-bottom:22px}
+.fg2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:640px){.fg2{grid-template-columns:1fr}}
+.fg{display:flex;flex-direction:column;gap:5px}
+.fg.full{grid-column:1/-1}
+.fg label{font-size:.8rem;font-weight:600;color:var(--ink2)}
+.fg input,.fg select,.fg textarea{
+    padding:10px 12px;border:2px solid var(--brd);border-radius:9px;
+    font-family:'Plus Jakarta Sans',sans-serif;font-size:.9rem;
+    outline:none;transition:border-color .2s;background:var(--surf);color:var(--ink);
+}
+.fg input:focus,.fg select:focus,.fg textarea:focus{border-color:var(--blue)}
+.fg textarea{resize:vertical}
+.ip{max-width:100%;max-height:150px;object-fit:cover;border-radius:8px;margin-top:5px}
+.btn-p{
+    background:linear-gradient(135deg,var(--blue),var(--pink));color:#fff;border:none;
+    padding:11px 22px;border-radius:9px;font-family:'Syne',sans-serif;font-size:.88rem;
+    font-weight:700;cursor:pointer;transition:opacity .2s;
+}
+.btn-p:hover{opacity:.88}
+.btn-p:disabled{opacity:.6;cursor:not-allowed}
+.btn-s{
+    background:transparent;color:var(--ink2);border:2px solid var(--brd);
+    padding:11px 20px;border-radius:9px;font-size:.88rem;font-weight:500;cursor:pointer;transition:all .2s;
+}
+.btn-s:hover{border-color:var(--ink);color:var(--ink)}
+.factions{display:flex;gap:9px;margin-top:20px}
+
+/* ── SOCIAL LAYOUT ── */
+.soc-layout{display:grid;grid-template-columns:340px 1fr;gap:22px;align-items:start}
+@media(max-width:900px){.soc-layout{grid-template-columns:1fr}}
+.compose{
+    background:var(--surf);border:1px solid var(--brd);border-radius:var(--rlg);
+    padding:22px;position:sticky;top:76px;
+}
+.compose h2{
+    font-family:'Syne',sans-serif;font-weight:800;font-size:1.05rem;margin-bottom:16px;
+    background:linear-gradient(135deg,var(--blue),var(--pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+.share-btn{
+    width:100%;background:linear-gradient(135deg,var(--blue),var(--pink));color:#fff;
+    border:none;padding:11px;border-radius:9px;font-family:'Syne',sans-serif;
+    font-weight:700;font-size:.88rem;cursor:pointer;margin-top:10px;transition:opacity .2s;
+}
+.share-btn:hover{opacity:.88}
+.share-btn:disabled{opacity:.6;cursor:not-allowed}
+
+/* ── POST CARD ── */
+.post-card{
+    background:var(--surf);border:1px solid var(--brd);border-radius:var(--rlg);
+    padding:20px;margin-bottom:13px;animation:fup .3s ease both;
+}
+@keyframes fup{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
+.post-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
+.post-auth-row{display:flex;align-items:center;gap:10px}
+.av-sm{
+    width:38px;height:38px;border-radius:50%;overflow:hidden;flex-shrink:0;
+    background:linear-gradient(135deg,var(--blue),var(--pink));
+    display:flex;align-items:center;justify-content:center;
+    font-family:'Syne',sans-serif;font-weight:700;font-size:.8rem;color:#fff;cursor:pointer;
+}
+.av-sm img{width:100%;height:100%;object-fit:cover}
+.post-info .pname{font-weight:700;font-size:.9rem;cursor:pointer;transition:color .15s}
+.post-info .pname:hover{color:var(--blue)}
+.post-info .pts{font-size:.75rem;color:var(--muted)}
+.post-info .ploc{font-size:.75rem;color:var(--blue);margin-top:2px;font-weight:500}
+.live-badge{
+    display:inline-flex;align-items:center;gap:4px;
+    background:var(--pink-pl);color:var(--pink-dk);font-size:.7rem;font-weight:700;
+    padding:3px 9px;border-radius:99px;border:1px solid #fbcfe8;white-space:nowrap;
+}
+.ldot{width:5px;height:5px;background:var(--pink);border-radius:50%;animation:pulse 1.4s ease infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.2}}
+.post-text{font-size:.9rem;line-height:1.65;color:var(--ink2);margin-bottom:11px}
+.post-img{width:100%;border-radius:10px;margin-bottom:11px}
+.post-actions{display:flex;gap:16px;padding-top:11px;border-top:1px solid var(--brd);align-items:center}
+.act-btn{
+    display:flex;align-items:center;gap:5px;background:none;border:none;cursor:pointer;
+    font-size:.82rem;color:var(--muted);font-family:'Plus Jakarta Sans',sans-serif;transition:color .2s;padding:0;
+}
+.act-btn:hover{color:var(--pink)}
+.act-btn.liked{color:var(--pink)}
+.act-btn.liked svg{fill:var(--pink)}
+.act-btn.comment:hover{color:var(--blue)}
+.post-del{
+    margin-left:auto;background:none;border:none;cursor:pointer;
+    color:var(--muted);font-size:.75rem;padding:3px 8px;border-radius:6px;transition:all .2s;
+}
+.post-del:hover{color:#ef4444;background:#fff5f5}
+
+/* ── AVATAR ── */
+.av-lg{
+    width:80px;height:80px;border-radius:50%;overflow:hidden;
+    background:linear-gradient(135deg,var(--blue),var(--pink));
+    display:flex;align-items:center;justify-content:center;
+    font-family:'Syne',sans-serif;font-weight:800;font-size:1.5rem;color:#fff;flex-shrink:0;
+}
+.av-lg img{width:100%;height:100%;object-fit:cover}
+
+/* ── PROFILE SECTION ── */
+.prof-header{
+    background:var(--surf);border:1px solid var(--brd);border-radius:var(--rlg);
+    padding:28px;display:flex;gap:22px;align-items:flex-start;margin-bottom:22px;
+    flex-wrap:wrap;
+}
+.prof-info{flex:1;min-width:200px}
+.prof-name{font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;margin-bottom:4px}
+.prof-bio{font-size:.9rem;color:var(--ink2);line-height:1.6;margin-bottom:10px}
+.prof-inst{font-size:.82rem;color:var(--blue);font-weight:600;margin-bottom:12px}
+.prof-stats{display:flex;gap:20px;margin-bottom:14px}
+.pstat{display:flex;flex-direction:column;align-items:center}
+.pstat strong{font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700}
+.pstat span{font-size:.75rem;color:var(--muted)}
+.prof-actions{display:flex;gap:8px;flex-wrap:wrap}
+.follow-btn{
+    padding:9px 20px;border-radius:9px;border:none;cursor:pointer;
+    font-family:'Syne',sans-serif;font-size:.85rem;font-weight:700;transition:all .2s;
+}
+.follow-btn.following{background:var(--surf2);color:var(--ink2);border:2px solid var(--brd)}
+.follow-btn.following:hover{border-color:#ef4444;color:#ef4444}
+.follow-btn.not-following{background:linear-gradient(135deg,var(--blue),var(--pink));color:#fff}
+.follow-btn.not-following:hover{opacity:.88}
+
+.prof-tabs{display:flex;gap:7px;margin-bottom:18px}
+.ptab{
+    font-family:'Syne',sans-serif;font-size:.83rem;font-weight:700;
+    padding:8px 16px;border-radius:9px;cursor:pointer;
+    border:2px solid var(--brd);background:var(--surf);color:var(--muted);transition:all .2s;
+}
+.ptab.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+
+/* Edit profile form */
+.edit-prof-form{background:var(--surf);border:1px solid var(--brd);border-radius:var(--rlg);padding:26px;margin-bottom:22px}
+.edit-prof-form h3{font-family:'Syne',sans-serif;font-weight:700;font-size:1rem;margin-bottom:18px}
+
+/* ── EMPTY STATE ── */
+.empty{
+    text-align:center;padding:48px 20px;
+    background:var(--surf);border-radius:var(--rlg);border:1px dashed var(--brd);
+}
+.empty .emo{font-size:2.6rem;margin-bottom:11px}
+.empty h3{font-family:'Syne',sans-serif;font-size:1.05rem;font-weight:700;margin-bottom:4px}
+.empty p{color:var(--muted);font-size:.85rem}
+
+/* ── CHAT DRAWER ── */
+.chat-overlay{
+    position:fixed;inset:0;z-index:500;background:rgba(15,23,42,.4);
+    backdrop-filter:blur(3px);display:none;opacity:0;transition:opacity .3s;
+}
+.chat-overlay.open{display:block}
+.chat-overlay.vis{opacity:1}
+.chat-drawer{
+    position:fixed;top:0;right:0;bottom:0;z-index:501;
+    width:min(860px,100vw);background:var(--surf);
+    display:flex;flex-direction:column;
+    transform:translateX(100%);transition:transform .3s cubic-bezier(.4,0,.2,1);
+    box-shadow:-4px 0 40px rgba(15,23,42,.15);
+}
+.chat-drawer.open{transform:translateX(0)}
+.cd-head{
+    background:linear-gradient(135deg,var(--blue-deep),var(--blue) 60%,var(--pink-dk));
+    padding:16px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;
+}
+.cd-head h2{font-family:'Syne',sans-serif;font-weight:800;color:#fff;font-size:1.05rem}
+.cd-close{
+    background:rgba(255,255,255,.15);border:none;color:#fff;
+    width:32px;height:32px;border-radius:50%;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;transition:background .2s;
+}
+.cd-close:hover{background:rgba(255,255,255,.25)}
+.cd-body{display:flex;flex:1;overflow:hidden}
+.inbox-panel{width:270px;border-right:1px solid var(--brd);display:flex;flex-direction:column;flex-shrink:0}
+.inbox-title{padding:12px 16px;font-family:'Syne',sans-serif;font-weight:700;font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--brd);flex-shrink:0}
+.inbox-list{flex:1;overflow-y:auto}
+.ibitem{
+    padding:13px 16px;cursor:pointer;border-bottom:1px solid var(--brd);transition:background .15s;
+    display:flex;flex-direction:column;gap:3px;
+}
+.ibitem:hover{background:var(--blue-pl)}
+.ibitem.active{background:var(--blue-lt)}
+.ib-name{font-weight:600;font-size:.85rem;color:var(--ink)}
+.ib-last{font-size:.75rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.inbox-empty{padding:26px 16px;text-align:center;color:var(--muted);font-size:.83rem}
+.chat-conv{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.conv-head{padding:13px 18px;border-bottom:1px solid var(--brd);flex-shrink:0}
+.conv-head .cn{font-family:'Syne',sans-serif;font-weight:700;font-size:.95rem}
+.conv-head .cs{font-size:.75rem;color:var(--muted);margin-top:2px}
+.msgs-area{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:9px}
+.mrow{display:flex;gap:7px}
+.mrow.mine{flex-direction:row-reverse}
+.bubble{max-width:70%;padding:9px 13px;border-radius:15px;font-size:.86rem;line-height:1.5;word-break:break-word}
+.bubble.theirs{background:var(--surf2);border:1px solid var(--brd);border-bottom-left-radius:4px}
+.bubble.mine{background:linear-gradient(135deg,var(--blue),var(--pink));color:#fff;border-bottom-right-radius:4px}
+.bubble .mt{font-size:.65rem;opacity:.55;margin-top:3px;display:block}
+.chat-input{padding:12px 16px;border-top:1px solid var(--brd);display:flex;gap:9px;flex-shrink:0}
+.chat-input input{
+    flex:1;padding:9px 13px;border:2px solid var(--brd);border-radius:99px;
+    font-family:'Plus Jakarta Sans',sans-serif;font-size:.88rem;outline:none;transition:border-color .2s;
+}
+.chat-input input:focus{border-color:var(--blue)}
+.send-btn{
+    background:linear-gradient(135deg,var(--blue),var(--pink));color:#fff;border:none;
+    width:40px;height:40px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .2s;
+}
+.send-btn:hover{opacity:.85}
+.conv-ph{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--muted);text-align:center;padding:24px}
+.conv-ph .emo{font-size:2.2rem}
+.conv-ph p{font-size:.88rem}
+
+/* ── COMMENTS MODAL ── */
+.modal-backdrop{position:fixed;inset:0;z-index:600;background:rgba(15,23,42,.45);backdrop-filter:blur(3px);display:flex;align-items:flex-end;justify-content:center;padding-bottom:0}
+@media(min-width:600px){.modal-backdrop{align-items:center;padding:20px}}
+.cm-panel{
+    background:var(--surf);border-radius:20px 20px 0 0;width:100%;max-width:640px;
+    display:flex;flex-direction:column;max-height:90vh;
+    animation:slideup .3s ease;
+}
+@media(min-width:600px){.cm-panel{border-radius:20px;max-height:80vh}}
+@keyframes slideup{from{transform:translateY(100%)}to{transform:none}}
+.cm-head{padding:16px 20px;border-bottom:1px solid var(--brd);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.cm-head h3{font-family:'Syne',sans-serif;font-weight:700;font-size:1rem}
+.cm-close{background:var(--surf2);border:none;width:30px;height:30px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1rem}
+.cm-list{flex:1;overflow-y:auto;padding:14px 18px;display:flex;flex-direction:column;gap:12px}
+.cm-item{display:flex;gap:10px}
+.cm-bubble{background:var(--surf2);border:1px solid var(--brd);border-radius:12px;padding:10px 13px;flex:1}
+.cm-author{font-weight:700;font-size:.82rem;cursor:pointer;color:var(--blue)}
+.cm-text{font-size:.88rem;color:var(--ink2);margin-top:2px;line-height:1.5}
+.cm-ts{font-size:.7rem;color:var(--muted);margin-top:4px}
+.cm-input{padding:12px 16px;border-top:1px solid var(--brd);display:flex;gap:9px;flex-shrink:0}
+.cm-input input{
+    flex:1;padding:9px 13px;border:2px solid var(--brd);border-radius:99px;
+    font-family:'Plus Jakarta Sans',sans-serif;font-size:.88rem;outline:none;transition:border-color .2s;
+}
+.cm-input input:focus{border-color:var(--blue)}
+
+/* ── PROFILE MODAL ── */
+.pm-panel{
+    background:var(--surf);border-radius:20px;width:100%;max-width:480px;
+    max-height:85vh;overflow-y:auto;animation:fup .3s ease;
+    padding:28px;
+}
+.pm-top{display:flex;gap:16px;align-items:flex-start;margin-bottom:18px;flex-wrap:wrap}
+.pm-info .pm-name{font-family:'Syne',sans-serif;font-size:1.2rem;font-weight:800;margin-bottom:3px}
+.pm-info .pm-inst{font-size:.8rem;color:var(--blue);font-weight:600;margin-bottom:6px}
+.pm-info .pm-bio{font-size:.85rem;color:var(--ink2);line-height:1.6;margin-bottom:10px}
+.pm-stats{display:flex;gap:16px;margin-bottom:12px}
+.pm-actions{display:flex;gap:8px}
+.pm-posts{border-top:1px solid var(--brd);padding-top:16px}
+.pm-posts h4{font-family:'Syne',sans-serif;font-weight:700;font-size:.88rem;margin-bottom:12px;color:var(--muted)}
+
+/* ── ABOUT ── */
+.about-hero{
+    background:linear-gradient(135deg,var(--blue-deep),var(--blue) 55%,#9333ea);
+    border-radius:var(--rlg);padding:46px 38px;color:#fff;margin-bottom:24px;position:relative;overflow:hidden;
+}
+.about-hero::before{content:'';position:absolute;top:-50px;right:-50px;width:240px;height:240px;background:radial-gradient(circle,rgba(252,231,243,.18) 0%,transparent 70%);border-radius:50%}
+.about-hero h1{font-family:'Syne',sans-serif;font-size:2.2rem;font-weight:800;margin-bottom:12px;line-height:1.1}
+.about-hero h1 span{background:linear-gradient(90deg,#fce7f3,#fbcfe8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.about-hero p{color:rgba(255,255,255,.8);font-size:.95rem;line-height:1.7;max-width:600px}
+.about-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
+@media(max-width:640px){.about-grid{grid-template-columns:1fr}}
+.acard{background:var(--surf);border:1px solid var(--brd);border-radius:var(--rlg);padding:24px}
+.acard .aci{width:44px;height:44px;border-radius:11px;background:linear-gradient(135deg,var(--blue-lt),var(--pink-lt));display:flex;align-items:center;justify-content:center;font-size:1.3rem;margin-bottom:12px}
+.acard h3{font-family:'Syne',sans-serif;font-weight:700;font-size:.95rem;margin-bottom:7px}
+.acard p{font-size:.85rem;color:var(--ink2);line-height:1.65}
+.team-sec{background:var(--surf);border:1px solid var(--brd);border-radius:var(--rlg);padding:28px}
+.team-sec h2{font-family:'Syne',sans-serif;font-weight:800;font-size:1.2rem;margin-bottom:20px}
+.team-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
+.tcard{background:var(--surf2);border:1px solid var(--brd);border-radius:var(--r);padding:18px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:9px}
+.tav{width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--pink));display:flex;align-items:center;justify-content:center;font-size:1.2rem;color:#fff;font-family:'Syne',sans-serif;font-weight:700}
+.tname{font-family:'Syne',sans-serif;font-weight:700;font-size:.88rem}
+.trole{font-size:.75rem;color:var(--muted)}
+.temail{display:inline-flex;align-items:center;gap:4px;background:var(--blue-pl);color:var(--blue);padding:4px 11px;border-radius:99px;font-size:.74rem;font-weight:600;text-decoration:none;transition:background .2s;margin-top:2px}
+.temail:hover{background:var(--blue-lt)}
+
+/* ══════════════════════════════════════
+   MOBILE RESPONSIVE  (≤ 768px)
+══════════════════════════════════════ */
+
+/* ── Auth: tighter padding on small screens ── */
+@media(max-width:480px){
+    .auth-wrap{padding:28px 20px;border-radius:18px}
+    .auth-logo{font-size:1.5rem}
+}
+
+/* ── Header: collapse on mobile ── */
+@media(max-width:768px){
+    header{padding:0 14px;height:56px;gap:8px}
+    .h-inst{display:none} /* hide institution filter in header — accessible via page instead */
+    .logo{font-size:1.15rem}
+    .h-uname{display:none} /* hide name text, keep avatar */
+    .user-pill{padding:3px 3px;border-radius:50%;gap:0}
+    .logout-btn{display:none} /* moved to profile page on mobile */
+    .h-right{gap:6px}
+}
+
+/* ── Top nav: full-width scrollable, smaller text ── */
+@media(max-width:768px){
+    .main-nav{padding:0 8px;top:56px}
+    .nav-btn{padding:0 12px;height:44px;font-size:.8rem}
+}
+
+/* ── Page padding reduced ── */
+@media(max-width:768px){
+    .page{padding:16px 12px}
+}
+
+/* ── Market tabs wrap ── */
+@media(max-width:480px){
+    .mkt-tabs{flex-wrap:wrap}
+    .mkt-tab{flex:1;text-align:center;font-size:.78rem;padding:8px 10px}
+}
+
+/* ── Business grid: single column ── */
+@media(max-width:600px){
+    .biz-grid{grid-template-columns:1fr}
+}
+
+/* ── Form card: tighter padding ── */
+@media(max-width:600px){
+    .form-card{padding:18px 14px}
+    .form-card h2{font-size:1.15rem;margin-bottom:16px}
+    .factions{flex-direction:column}
+    .factions .btn-p,.factions .btn-s{width:100%;text-align:center}
+}
+
+/* ── Socialize: single column ── */
+@media(max-width:900px){
+    .soc-layout{grid-template-columns:1fr}
+    .compose{position:static;top:unset}
+}
+
+/* ── Profile header: stack on mobile ── */
+@media(max-width:600px){
+    .prof-header{flex-direction:column;align-items:center;text-align:center;padding:20px 16px}
+    .prof-info{min-width:unset;width:100%}
+    .prof-stats{justify-content:center}
+    .prof-actions{justify-content:center;flex-wrap:wrap}
+    .edit-prof-form{padding:18px 14px}
+    .prof-tabs{flex-wrap:wrap}
+    .ptab{flex:1;text-align:center;font-size:.78rem}
+}
+
+/* ── About hero: smaller font ── */
+@media(max-width:600px){
+    .about-hero{padding:28px 20px}
+    .about-hero h1{font-size:1.6rem}
+    .about-hero p{font-size:.88rem}
+}
+
+/* ── Chat drawer: full width + stacked on mobile ── */
+@media(max-width:768px){
+    .chat-drawer{width:100vw}
+    .cd-body{flex-direction:column}
+    .inbox-panel{
+        width:100%;border-right:none;
+        border-bottom:1px solid var(--brd);
+        max-height:220px;flex-shrink:0;
+    }
+    .chat-conv{flex:1;min-height:0}
+    .bubble{max-width:85%}
+}
+
+/* ── Comments modal: bottom sheet full width ── */
+@media(max-width:600px){
+    .cm-panel{border-radius:18px 18px 0 0;max-height:85vh}
+    .cm-head{padding:14px 16px}
+    .cm-list{padding:12px 14px}
+    .cm-input{padding:10px 12px}
+}
+
+/* ── Profile modal: near full screen ── */
+@media(max-width:600px){
+    .modal-backdrop{padding:0;align-items:flex-end}
+    .pm-panel{
+        border-radius:20px 20px 0 0;max-width:100%;
+        max-height:90vh;padding:22px 16px;
+    }
+    .pm-top{flex-direction:column;align-items:center;text-align:center}
+    .pm-actions{justify-content:center;flex-wrap:wrap}
+    .pm-stats{justify-content:center}
+}
+
+/* ── Mobile logout: show on profile page via a dedicated button ── */
+@media(max-width:768px){
+    .mobile-logout-row{display:flex!important}
+}
+.mobile-logout-row{
+    display:none;justify-content:center;margin-top:16px;
+}
+.mobile-logout-btn{
+    background:#fff5f5;color:#ef4444;border:1px solid #fecaca;
+    padding:10px 28px;border-radius:9px;font-family:'Syne',sans-serif;
+    font-weight:700;font-size:.88rem;cursor:pointer;transition:all .2s;
+}
+.mobile-logout-btn:hover{background:#fef2f2}
+
+/* ── Prevent horizontal scroll on body ── */
+@media(max-width:768px){
+    body{overflow-x:hidden}
+    .pills{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}
+    .pills::-webkit-scrollbar{height:0}
+}
+
+/* ══════════════════════════════════════
+   BILLBOARD / AD CAROUSEL
+══════════════════════════════════════ */
+.billboard-wrap{
+    position:relative;margin-bottom:20px;
+    border-radius:var(--rlg);overflow:hidden;
+    box-shadow:var(--shmd);background:var(--ink);
+    min-height:180px;
+}
+.billboard-wrap.bb-empty{display:none}
+.billboard-slide{display:none;position:relative;text-decoration:none;color:inherit}
+.billboard-slide.active{display:block}
+.billboard-slide img.bb-img{
+    width:100%;height:260px;object-fit:cover;display:block;
+}
+@media(max-width:600px){.billboard-slide img.bb-img{height:185px}}
+.bb-overlay{
+    position:absolute;inset:0;
+    background:linear-gradient(to top,rgba(15,23,42,.85) 0%,rgba(15,23,42,.18) 55%,transparent 100%);
+    pointer-events:none;
+}
+.bb-content{position:absolute;bottom:0;left:0;right:0;padding:20px 22px 16px}
+.bb-sponsor{
+    display:inline-flex;align-items:center;gap:5px;
+    background:linear-gradient(135deg,var(--blue),var(--pink));
+    color:#fff;font-size:.66rem;font-weight:700;letter-spacing:.6px;
+    padding:3px 10px;border-radius:99px;margin-bottom:8px;text-transform:uppercase;
+}
+.bb-name{
+    font-family:'Syne',sans-serif;font-size:1.2rem;font-weight:800;
+    color:#fff;margin-bottom:4px;line-height:1.2;
+    text-shadow:0 1px 8px rgba(0,0,0,.5);
+}
+@media(max-width:480px){.bb-name{font-size:1rem}}
+.bb-tagline{font-size:.84rem;color:rgba(255,255,255,.8);margin-bottom:12px;line-height:1.4}
+@media(max-width:480px){.bb-tagline{font-size:.77rem;margin-bottom:8px}}
+.bb-cta{
+    display:inline-flex;align-items:center;gap:6px;
+    background:rgba(255,255,255,.15);backdrop-filter:blur(6px);
+    border:1px solid rgba(255,255,255,.3);color:#fff;
+    padding:8px 16px;border-radius:8px;font-size:.82rem;font-weight:600;
+    transition:background .2s;
+}
+.bb-cta:hover{background:rgba(255,255,255,.28)}
+.bb-dots{
+    position:absolute;bottom:16px;right:18px;
+    display:flex;gap:5px;align-items:center;
+}
+.bb-dot{
+    width:7px;height:7px;border-radius:50%;
+    background:rgba(255,255,255,.38);cursor:pointer;
+    transition:all .22s;border:none;padding:0;
+}
+.bb-dot.active{background:#fff;width:20px;border-radius:99px}
+.bb-arrow{
+    position:absolute;top:50%;transform:translateY(-50%);
+    background:rgba(255,255,255,.14);backdrop-filter:blur(4px);
+    border:1px solid rgba(255,255,255,.22);color:#fff;
+    width:34px;height:34px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    cursor:pointer;transition:background .2s;z-index:2;
+}
+.bb-arrow:hover{background:rgba(255,255,255,.28)}
+.bb-arrow.prev{left:12px}
+.bb-arrow.next{right:12px}
+@media(max-width:480px){.bb-arrow{display:none}}
+</style>
+</head>
+<body>
+
+<!-- LOADER -->
+<div id="loader">
+    <div class="ld-logo">Campus<span>Loci</span></div>
+    <div class="ld-bar"></div>
+    <p style="color:rgba(255,255,255,.45);font-size:.8rem">Loading…</p>
+</div>
+
+<!-- ═══════════ AUTH SCREEN ═══════════ -->
+<div id="authScreen" class="hidden">
+    <div class="auth-wrap">
+        <div class="auth-logo">Campus<span>Loci</span></div>
+        <p class="auth-sub">Your campus. Your community.</p>
+        <div class="auth-tabs" id="authTabsRow">
+            <button class="active" id="atLogin"    onclick="authTab('login')">Sign In</button>
+            <button              id="atRegister" onclick="authTab('register')">Register</button>
+        </div>
+        <!-- Login -->
+        <div id="loginForm" class="auth-form">
+            <input type="email"    id="liEmail" placeholder="Email address">
+            <input type="password" id="liPw"    placeholder="Password">
+            <p id="liErr" class="auth-err"></p>
+            <button class="auth-btn" id="liBtn" onclick="doLogin()">Sign In →</button>
+            <div class="auth-link">
+                <button onclick="authTab('forgot')">Forgot your password?</button>
+            </div>
+        </div>
+        <!-- Register -->
+        <div id="regForm" class="auth-form hidden">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <input type="text" id="reFirstName" placeholder="First Name">
+                <input type="text" id="reLastName"  placeholder="Last Name">
+            </div>
+            <input type="email"    id="reEmail" placeholder="Email address">
+            <input type="password" id="rePw"    placeholder="Password (min 6 chars)">
+            <p id="reErr" class="auth-err"></p>
+            <button class="auth-btn" id="reBtn" onclick="doRegister()">Create Account →</button>
+        </div>
+        <!-- Forgot Password -->
+        <div id="forgotForm" class="auth-form hidden">
+            <p style="font-size:.85rem;color:var(--muted);text-align:center;margin-bottom:4px">
+                Enter your email and we'll send a reset link.
+            </p>
+            <input type="email" id="fpEmail" placeholder="Email address">
+            <p id="fpMsg" class="auth-ok"></p>
+            <p id="fpErr" class="auth-err"></p>
+            <button class="auth-btn" id="fpBtn" onclick="doResetPassword()">Send Reset Link →</button>
+            <div class="auth-link">
+                <button onclick="authTab('login')">← Back to Sign In</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════ APP SCREEN ═══════════ -->
+<div id="appScreen" class="hidden">
+
+    <!-- Header -->
+    <header>
+        <div class="h-left">
+            <div class="logo" onclick="switchTab('market')">Campus<span>Loci</span></div>
+            <div class="h-inst">
+                <select id="instFilter">
+                    <option value="">All Institutions</option>
+                </select>
+            </div>
+        </div>
+        <div class="h-right">
+            <button class="icon-btn" onclick="openInbox()" title="Messages">
+                <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                </svg>
+                <span class="ibadge" id="inboxBadge">0</span>
+            </button>
+            <div class="user-pill" onclick="switchTab('profile')" title="My Profile">
+                <div class="h-av" id="hAv">?</div>
+                <span class="h-uname" id="hName">User</span>
+            </div>
+            <button class="logout-btn" onclick="doLogout()">Sign Out</button>
+        </div>
+    </header>
+
+    <!-- Nav -->
+    <nav class="main-nav">
+        <button class="nav-btn active" id="navMarket"    onclick="switchTab('market')">🛍 Market</button>
+        <button class="nav-btn"        id="navSocialize" onclick="switchTab('socialize')">📸 Socialize</button>
+        <button class="nav-btn"        id="navProfile"   onclick="switchTab('profile')">👤 Profile</button>
+        <button class="nav-btn"        id="navAbout"     onclick="switchTab('about')">ℹ️ About Us</button>
+    </nav>
+
+    <!-- ── MARKET ── -->
+    <div id="secMarket" class="page">
+        <!-- Mobile-only institution filter -->
+        <div id="mobileInstRow" style="display:none;margin-bottom:12px">
+            <select id="instFilterMobile" onchange="syncMobileInst(this.value)"
+                style="width:100%;padding:10px 13px;border:2px solid var(--brd);border-radius:var(--r);
+                font-family:'Plus Jakarta Sans',sans-serif;font-size:.88rem;outline:none;
+                background:var(--surf);color:var(--ink);">
+                <option value="">All Institutions</option>
+            </select>
+        </div>
+        <div class="mkt-tabs">
+            <button class="mkt-tab active" id="mtBrowse" onclick="mktTab('browse')">Browse Businesses</button>
+            <button class="mkt-tab"        id="mtList"   onclick="mktTab('list')">➕ List Your Business</button>
+        </div>
+        <!-- Browse -->
+        <div id="mkBrowse">
+            <div class="srch">
+                <svg class="si" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                </svg>
+                <input type="text" id="srchInput" placeholder="Search businesses…">
+            </div>
+            <div class="pills" id="catPills"></div>
+            <div class="biz-grid" id="bizGrid"></div>
+            <div id="noResults" class="empty hidden"><div class="emo">🔍</div><h3>No businesses found</h3><p>Try different filters</p></div>
+        </div>
+        <!-- List -->
+        <div id="mkList" class="hidden">
+            <div class="form-card">
+                <h2>List Your Business</h2>
+                <div class="fg2">
+                    <div class="fg"><label>Business Name *</label><input type="text" id="bName" placeholder="e.g. Campus Tutors Pro"></div>
+                    <div class="fg"><label>Category *</label><select id="bCat"></select></div>
+                    <div class="fg full"><label>Institution *</label><select id="bInst"><option value="">Select institution</option></select></div>
+                    <div class="fg full"><label>Description *</label><textarea id="bDesc" rows="3" placeholder="Describe your business…"></textarea></div>
+                    <div class="fg"><label>Price *</label><input type="text" id="bPrice" placeholder="e.g. R150/hour"></div>
+                    <div class="fg"><label>Location *</label><input type="text" id="bLoc" placeholder="e.g. Upper Campus"></div>
+                    <div class="fg"><label>Contact Number *</label><input type="tel" id="bContact" placeholder="e.g. 073 456 7890"></div>
+                    <div class="fg"><label>Availability *</label><input type="text" id="bAvail" placeholder="e.g. Mon-Fri 18:00-21:00"></div>
+                    <div class="fg full"><label>Upload Image</label><input type="file" id="bImg" accept="image/*"><div id="bImgPrev"></div></div>
+                </div>
+                <div class="factions">
+                    <button class="btn-p" id="submitBizBtn" onclick="submitBusiness()">➕ List Business</button>
+                    <button class="btn-s" onclick="mktTab('browse')">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── SOCIALIZE ── -->
+    <div id="secSocialize" class="page hidden">
+
+        <!-- Mobile-only institution filter -->
+        <div id="mobileInstSocRow" style="display:none;margin-bottom:12px">
+            <select id="instFilterSocMobile" onchange="syncMobileInstSoc(this.value)"
+                style="width:100%;padding:10px 13px;border:2px solid var(--brd);border-radius:var(--r);
+                font-family:'Plus Jakarta Sans',sans-serif;font-size:.88rem;outline:none;
+                background:var(--surf);color:var(--ink);">
+                <option value="">All Institutions</option>
+            </select>
+        </div>
+
+        <!-- Socialize tabs -->
+        <div class="mkt-tabs">
+            <button class="mkt-tab active" id="stFeed"    onclick="socTab('feed')">📋 Browse Posts</button>
+            <button class="mkt-tab"        id="stCompose" onclick="socTab('compose')">📸 Share a Moment</button>
+        </div>
+
+        <!-- Feed -->
+        <div id="socFeed">
+            <!-- ═══ BILLBOARD — always pinned above posts ═══ -->
+            <div class="billboard-wrap" id="billboardWrap">
+                <!-- Slides injected by renderBillboard() -->
+                <button class="bb-arrow prev" onclick="bbNav(-1)" aria-label="Previous ad">&#8249;</button>
+                <button class="bb-arrow next" onclick="bbNav(+1)" aria-label="Next ad">&#8250;</button>
+                <div class="bb-dots" id="bbDots"></div>
+            </div>
+            <!-- ════════════════════════════════════════════ -->
+            <div id="postsContainer"></div>
+            <div id="noPosts" class="empty"><div class="emo">📸</div><h3>No posts yet</h3><p>Be the first to share!</p></div>
+        </div>
+
+        <!-- Compose form (hidden until tab clicked) -->
+        <div id="socCompose" class="hidden">
+            <div class="form-card">
+                <h2>Share a Campus Moment 📸</h2>
+                <div class="fg2">
+                    <div class="fg">
+                        <label>Institution *</label>
+                        <select id="pInst"><option value="">Choose institution</option></select>
+                    </div>
+                    <div class="fg">
+                        <label>Campus Location *</label>
+                        <input type="text" id="pLoc" placeholder="e.g. Library, Main Quad">
+                    </div>
+                    <div class="fg full">
+                        <label>What's happening? *</label>
+                        <textarea id="pContent" rows="5" placeholder="Share something with your campus community…"></textarea>
+                    </div>
+                    <div class="fg full">
+                        <label>Add a photo</label>
+                        <input type="file" id="pImg" accept="image/*">
+                        <div id="pImgPrev"></div>
+                    </div>
+                </div>
+                <div class="factions">
+                    <button class="btn-p" id="shareBtn" onclick="createPost()">📤 Share Post</button>
+                    <button class="btn-s" onclick="socTab('feed')">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- ── PROFILE ── -->
+    <div id="secProfile" class="page hidden">
+        <div id="profCard">
+            <!-- Rendered dynamically -->
+        </div>
+        <div class="prof-tabs">
+            <button class="ptab active" id="ptPosts"     onclick="profTab('posts')">My Posts</button>
+            <button class="ptab"        id="ptBusiness"  onclick="profTab('business')">My Businesses</button>
+        </div>
+        <div id="profPosts"></div>
+        <div id="profBusiness" class="hidden"></div>
+    </div>
+
+    <!-- ── ABOUT ── -->
+    <div id="secAbout" class="page hidden">
+        <div class="about-hero">
+            <h1>Welcome to<br><span>CampusLoci</span></h1>
+            <p>CampusLoci is a student-first platform built to connect campus communities across South Africa.
+               Find tutoring, food, fashion, and more — or share your own campus moments in real time.</p>
+        </div>
+        <div class="about-grid">
+            <div class="acard"><div class="aci">🛍️</div><h3>Student Marketplace</h3><p>Discover and support student-run businesses across your campus. From food to fashion, tutoring to tech.</p></div>
+            <div class="acard"><div class="aci">📸</div><h3>Campus Social Feed</h3><p>Share photos, experiences, and campus moments in real time. Like, comment, and connect.</p></div>
+            <div class="acard"><div class="aci">💬</div><h3>Direct Messaging</h3><p>Chat directly with business owners and fellow students. Build trust before any commitment.</p></div>
+            <div class="acard"><div class="aci">🎓</div><h3>Follow &amp; Connect</h3><p>Follow classmates and entrepreneurs. Build your campus network and stay in the loop.</p></div>
+        </div>
+    </div>
+
+</div><!-- end appScreen -->
+
+<!-- ═══════════ CHAT DRAWER ═══════════ -->
+<div class="chat-overlay" id="chatOverlay" onclick="closeInbox()"></div>
+<div class="chat-drawer" id="chatDrawer">
+    <div class="cd-head">
+        <h2>💬 Messages</h2>
+        <button class="cd-close" onclick="closeInbox()">✕</button>
+    </div>
+    <div class="cd-body">
+        <div class="inbox-panel">
+            <div class="inbox-title">Conversations</div>
+            <div class="inbox-list" id="inboxList">
+                <div class="inbox-empty">No conversations yet.</div>
+            </div>
+        </div>
+        <div class="chat-conv">
+            <div class="conv-ph" id="convPh"><div class="emo">💬</div><p>Select a conversation to start chatting.</p></div>
+            <div class="conv-head hidden" id="convHead">
+                <div class="cn" id="convName"></div>
+                <div class="cs" id="convSub"></div>
+            </div>
+            <div class="msgs-area hidden" id="msgsArea"></div>
+            <div class="chat-input hidden" id="chatInputBar">
+                <input type="text" id="chatInput" placeholder="Type a message…" onkeydown="if(event.key==='Enter')sendMsg()">
+                <button class="send-btn" onclick="sendMsg()">
+                    <svg width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════ COMMENTS MODAL ═══════════ -->
+<div id="commentsModal" class="hidden">
+    <div class="modal-backdrop" onclick="closeComments()">
+        <div class="cm-panel" onclick="event.stopPropagation()">
+            <div class="cm-head">
+                <h3 id="cmTitle">Comments</h3>
+                <button class="cm-close" onclick="closeComments()">✕</button>
+            </div>
+            <div class="cm-list" id="cmList"></div>
+            <div class="cm-input">
+                <input type="text" id="cmInput" placeholder="Add a comment…" onkeydown="if(event.key==='Enter')addComment()">
+                <button class="send-btn" onclick="addComment()">
+                    <svg width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════ PROFILE VIEW MODAL ═══════════ -->
+<div id="profileModal" class="hidden">
+    <div class="modal-backdrop" onclick="closeProfileModal()">
+        <div class="pm-panel" onclick="event.stopPropagation()">
+            <div id="pmContent"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════
+     APP LOGIC
+═══════════════════════════════════════ -->
+<script>
+// ────────────────────────────────────────────────────────────────
+//  STATIC DATA
+// ────────────────────────────────────────────────────────────────
+
+// ╔══════════════════════════════════════════════════════════════╗
+// ║  BILLBOARD CONFIG — EDIT HERE IN VS CODE                    ║
+// ║                                                              ║
+// ║  Each ad object has:                                         ║
+// ║    image   → URL or relative path to your banner image      ║
+// ║    name    → Advertiser / brand name                        ║
+// ║    tagline → Short description shown on the banner           ║
+// ║    link    → Full URL the banner links to when clicked       ║
+// ║    cta     → Call-to-action button label                     ║
+// ║                                                              ║
+// ║  • Add more objects to the array to add more ads.           ║
+// ║  • Remove an object to remove that ad.                       ║
+// ║  • Set to [] (empty array) to hide the billboard entirely.   ║
+// ╚══════════════════════════════════════════════════════════════╝
+const BILLBOARDS = [
+    {
+        image:   'https://images.unsplash.com/photo-1523050854058-8df90110c9f1?w=1200&q=80',
+        name:    'StudentHub Deals',
+        tagline: 'Exclusive discounts for SA students — food, tech, fashion & more.',
+        link:    'https://example.com/studenthub',
+        cta:     'Explore Deals →'
+    },
+    {
+        image:   'https://images.unsplash.com/photo-1524178232363-1fb2b075b655?w=1200&q=80',
+        name:    'TutorConnect SA',
+        tagline: 'Find top-rated tutors near your campus. First session free!',
+        link:    'https://example.com/tutorconnect',
+        cta:     'Find a Tutor →'
+    },
+    {
+        image:   'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=1200&q=80',
+        name:    'Campus Eats',
+        tagline: 'Order from student chefs around your campus. Delivered in 30 min.',
+        link:    'https://example.com/campuseats',
+        cta:     'Order Now →'
+    },
+];
+// ═══════════════════════════════════════════════════════════════
+const INSTITUTION_GROUPS = [
+    {
+        group: '🏛️ Public Universities',
+        schools: [
+            'Cape Peninsula University of Technology',
+            'Central University of Technology',
+            'Durban University of Technology',
+            'Mangosuthu University of Technology',
+            'Nelson Mandela University',
+            'North-West University',
+            'Sefako Makgatho Health Sciences University',
+            'Sol Plaatje University',
+            'Stellenbosch University',
+            'Tshwane University of Technology',
+            'University of Cape Town',
+            'University of Fort Hare',
+            'University of Johannesburg',
+            'University of KwaZulu-Natal',
+            'University of Limpopo',
+            'University of Mpumalanga',
+            'University of Pretoria',
+            'University of South Africa (UNISA)',
+            'University of the Free State',
+            'University of the Venda',
+            'University of the Western Cape',
+            'University of the Witwatersrand',
+            'University of Zululand',
+            'Vaal University of Technology',
+            'Walter Sisulu University',
+        ]
+    },
+    {
+        group: '🎓 Private Universities',
+        schools: [
+            'Afda — The South African School of Motion Picture',
+            'Boston City Campus & Business College',
+            'CTI Education Group',
+            'Damelin',
+            'MANCOSA',
+            'Milpark Education',
+            'Monash South Africa',
+            'Regent Business School',
+            'Richfield Graduate Institute of Technology',
+            'Stadio (formerly Milpark)',
+            'The Independent Institute of Education (IIE)',
+            'Varsity College',
+        ]
+    },
+    {
+        group: '📚 Public Colleges (TVET)',
+        schools: [
+            'Boland TVET College',
+            'Buffalo City TVET College',
+            'Capricorn TVET College',
+            'Central Johannesburg TVET College',
+            'Coast KZN TVET College',
+            'College of Cape Town for Further Education',
+            'Eastcape Midlands TVET College',
+            'Ekurhuleni East TVET College',
+            'Ekurhuleni West TVET College',
+            'Elangeni TVET College',
+            'Esayidi TVET College',
+            'False Bay TVET College',
+            'Flavius Mareka TVET College',
+            'Garden Route TVET College',
+            'Goldfields TVET College',
+            'Ikhala TVET College',
+            'Ingwe TVET College',
+            'King Hintsa TVET College',
+            'King Sabata Dalindyebo TVET College',
+            'Lephalale TVET College',
+            'Letaba TVET College',
+            'Lovedale TVET College',
+            'Majuba TVET College',
+            'Mnambithi TVET College',
+            'Mopani South East TVET College',
+            'Motheo TVET College',
+            'Mthashana TVET College',
+            'Nkangala TVET College',
+            'Northern Cape Rural TVET College',
+            'Northern Cape Urban TVET College',
+            'Northlink TVET College',
+            'Orbit TVET College',
+            'Overberg TVET College',
+            'Port Elizabeth TVET College',
+            'Sedibeng TVET College',
+            'South Cape TVET College',
+            'South West Gauteng TVET College',
+            'Southerns TVET College',
+            'Taletso TVET College',
+            'Thekwini TVET College',
+            'Tshwane North TVET College',
+            'Tshwane South TVET College',
+            'Umfolozi TVET College',
+            'Umgungundlovu TVET College',
+            'Vhembe TVET College',
+            'Waterberg TVET College',
+            'West Coast TVET College',
+            'Western Cape TVET College',
+        ]
+    },
+    {
+        group: '🏫 Private Colleges',
+        schools: [
+            'Allenby Campus',
+            'CityVarsity',
+            'Concept Schools',
+            'Damelin Correspondence College',
+            'DC Academy',
+            'Design School Southern Africa (DSSA)',
+            'Eduvos',
+            'Flames Training Institute',
+            'Inscape Education Group',
+            'Intec College',
+            'Lyceum College',
+            'Oxbridge Academy',
+            'PC Training & Business College',
+            'Prestige Academy',
+            'SA College of Applied Psychology (SACAP)',
+            'Setplan Training College',
+            'Skills Academy',
+            'Stenden South Africa',
+            'The College of Photography',
+            'The Greenside Design Center',
+            'Vega School',
+            'Wellness College',
+        ]
+    },
+];
+
+// Flat list for backward compatibility (filtering, etc.)
+const INSTITUTIONS = INSTITUTION_GROUPS.flatMap(g => g.schools);
+
+const CATS = [
+    {id:'all',name:'All',icon:'✨'},
+    {id:'tutoring',name:'Tutoring',icon:'📚'},
+    {id:'food',name:'Food & Snacks',icon:'🍱'},
+    {id:'fashion',name:'Fashion',icon:'👗'},
+    {id:'tech',name:'Tech Services',icon:'💻'},
+    {id:'creative',name:'Creative',icon:'🎨'},
+    {id:'transport',name:'Transport',icon:'🚗'},
+    {id:'wellness',name:'Wellness',icon:'💆'},
+    {id:'other',name:'Other',icon:'🔧'}
+];
+
+const TEAM = [
+    {name:'Amahle Dlamini',role:'Co-Founder & CEO',email:'amahle@campusloci.co.za',i:'A'},
+    {name:'Sipho Nkosi',   role:'Co-Founder & CTO',email:'sipho@campusloci.co.za',  i:'S'},
+    {name:'Thandi Mokoena',role:'Head of Community',email:'thandi@campusloci.co.za', i:'T'},
+    {name:'Lebo Sithole',  role:'Design Lead',      email:'lebo@campusloci.co.za',   i:'L'},
+];
+
+const SEED_BUSINESSES = [
+    {fid:'seed-1',name:'Campus Tutors Pro',category:'tutoring',ownerId:'seed',ownerName:'Thabo Molefe',
+     description:'Mathematics & Physics tutoring for all years. 95% pass rate.',
+     institution:'University of Cape Town',price:'R150/hour',contact:'073 456 7890',
+     rating:4.8,reviews:24,location:'Upper Campus',availability:'Mon-Fri, 18:00-21:00',image:null},
+    {fid:'seed-2',name:'Byte Café Delivery',category:'food',ownerId:'seed',ownerName:'Lindiwe Nkosi',
+     description:'Homemade meals delivered to your res. Daily specials & bulk orders available.',
+     institution:'University of the Witwatersrand',price:'From R45',contact:'082 123 4567',
+     rating:4.9,reviews:156,location:'West Campus Delivery',availability:'Daily, 11:00-20:00',image:null},
+];
+
+// ────────────────────────────────────────────────────────────────
+//  STATE
+// ────────────────────────────────────────────────────────────────
+let currentUser    = null;   // Firebase auth user
+let myProfile      = null;   // Firestore user doc
+let filterInst     = '';
+let filterCat      = 'all';
+let searchQ        = '';
+let fsBusinesses   = [];
+let fsPosts        = [];
+let activeChatId   = null;
+let msgUnsub       = null;
+let cmUnsub        = null;
+let inboxItems     = [];
+let openPostId     = null;
+let bizImgData     = null;
+let postImgData    = null;
+let editingProfile = false;
+
+// ────────────────────────────────────────────────────────────────
+//  HELPERS
+// ────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+function initials(name) {
+    if (!name) return '?';
+    return name.split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase();
+}
+
+function avatar(src, name, cls='av-sm') {
+    if (src) return `<div class="${cls}"><img src="${src}" alt=""></div>`;
+    return `<div class="${cls}">${initials(name)}</div>`;
+}
+
+function fmtTime(ts) {
+    if (!ts?.toDate) return '';
+    return ts.toDate().toLocaleString('en-ZA',{dateStyle:'medium',timeStyle:'short'});
+}
+
+function fmtTimeSm(ts) {
+    if (!ts?.toDate) return '';
+    return ts.toDate().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+}
+
+// Image compression
+function compressImg(file, maxW, maxH, q=0.75) {
+    return new Promise(res => {
+        const img = new Image(), url = URL.createObjectURL(file);
+        img.onload = () => {
+            const scale = Math.min(maxW/img.width, maxH/img.height, 1);
+            const c = document.createElement('canvas');
+            c.width = img.width*scale; c.height = img.height*scale;
+            c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+            res(c.toDataURL('image/jpeg',q));
+            URL.revokeObjectURL(url);
+        };
+        img.src = url;
+    });
+}
+
+// ────────────────────────────────────────────────────────────────
+//  INIT
+// ────────────────────────────────────────────────────────────────
+function init() {
+    // Institution selects — grouped with optgroup labels
+    ['instFilter','bInst','pInst','instFilterMobile','instFilterSocMobile'].forEach(id => {
+        const sel = $(id); if (!sel) return;
+        INSTITUTION_GROUPS.forEach(grp => {
+            const og = document.createElement('optgroup');
+            og.label = grp.group;
+            grp.schools.forEach(s => {
+                const o = document.createElement('option');
+                o.value = s; o.textContent = s;
+                og.appendChild(o);
+            });
+            sel.appendChild(og);
+        });
+    });
+
+    // Show mobile inst rows only on small screens
+    const showHideMobile = () => {
+        const isMobile = window.innerWidth <= 768;
+        const mRow = $('mobileInstRow');
+        const sRow = $('mobileInstSocRow');
+        if (mRow) mRow.style.display = isMobile ? 'block' : 'none';
+        if (sRow) sRow.style.display = isMobile ? 'block' : 'none';
+    };
+    showHideMobile();
+    window.addEventListener('resize', showHideMobile);
+
+    // Category pills
+    const pillsCont = $('catPills');
+    CATS.forEach(cat => {
+        const btn = document.createElement('button');
+        btn.className = 'pill' + (cat.id==='all'?' active':'');
+        btn.textContent = cat.icon+' '+cat.name;
+        btn.onclick = () => {
+            document.querySelectorAll('.pill').forEach(b=>b.classList.remove('active'));
+            btn.classList.add('active');
+            filterCat = cat.id; renderBusinesses();
+        };
+        pillsCont.appendChild(btn);
+    });
+
+    // Business category select
+    const catSel = $('bCat');
+    CATS.filter(c=>c.id!=='all').forEach(cat => {
+        const o = document.createElement('option');
+        o.value = cat.id; o.textContent = cat.icon+' '+cat.name;
+        catSel.appendChild(o);
+    });
+
+    // Events
+    $('instFilter').addEventListener('change', e => {
+        filterInst = e.target.value;
+        const mob = $('instFilterMobile');
+        if (mob) mob.value = filterInst;
+        const socMob = $('instFilterSocMobile');
+        if (socMob) socMob.value = filterInst;
+        renderBusinesses(); renderPosts();
+    });
+    $('srchInput').addEventListener('input', e => {
+        searchQ = e.target.value; renderBusinesses();
+    });
+    $('bImg').addEventListener('change', async e => {
+        const f = e.target.files[0]; if (!f) return;
+        bizImgData = await compressImg(f,800,600);
+        $('bImgPrev').innerHTML = `<img src="${bizImgData}" class="ip">`;
+    });
+    $('pImg').addEventListener('change', async e => {
+        const f = e.target.files[0]; if (!f) return;
+        postImgData = await compressImg(f,900,700);
+        $('pImgPrev').innerHTML = `<img src="${postImgData}" class="ip">`;
+    });
+
+    // Team grid removed per request
+}
+
+// ────────────────────────────────────────────────────────────────
+//  FIREBASE READY → BOOT AUTH
+// ────────────────────────────────────────────────────────────────
+window.addEventListener('firebase-ready', () => {
+    if (!window._auth) {
+        $('loader').style.display = 'none';
+        $('authScreen').classList.remove('hidden');
+        return;
+    }
+
+    window._auth.onChange(async user => {
+        $('loader').style.opacity = '0';
+        setTimeout(() => $('loader').style.display='none', 400);
+
+        if (user) {
+            currentUser = user;
+            await loadMyProfile();
+            showApp();
+        } else {
+            currentUser = null; myProfile = null;
+            showAuth();
+        }
+    });
+});
+
+setTimeout(() => {
+    if ($('loader').style.display !== 'none') {
+        $('loader').style.opacity = '0';
+        setTimeout(() => $('loader').style.display='none', 400);
+        $('authScreen').classList.remove('hidden');
+    }
+}, 6000);
+
+// ────────────────────────────────────────────────────────────────
+//  AUTH
+// ────────────────────────────────────────────────────────────────
+function authTab(tab) {
+    $('loginForm').classList.toggle('hidden',  tab!=='login');
+    $('regForm').classList.toggle('hidden',    tab!=='register');
+    $('forgotForm').classList.toggle('hidden', tab!=='forgot');
+    $('atLogin').classList.toggle('active',    tab==='login');
+    $('atRegister').classList.toggle('active', tab==='register');
+    // Clear all messages
+    $('liErr').textContent=''; $('reErr').textContent='';
+    $('fpMsg').textContent=''; $('fpErr').textContent='';
+    // Hide tabs row when on forgot screen so it stays clean
+    $('authTabsRow').style.display = tab==='forgot' ? 'none' : '';
+}
+
+async function doResetPassword() {
+    const email = $('fpEmail').value.trim();
+    $('fpMsg').textContent = ''; $('fpErr').textContent = '';
+    if (!email) { $('fpErr').textContent = 'Please enter your email address.'; return; }
+    const btn = $('fpBtn'); btn.disabled=true; btn.textContent='Sending…';
+    try {
+        await window._auth.resetPassword(email);
+        $('fpMsg').textContent = '✅ Reset link sent! Check your inbox (and spam folder).';
+        $('fpEmail').value = '';
+    } catch(e) {
+        $('fpErr').textContent = friendlyAuthErr(e.code);
+    } finally {
+        btn.disabled=false; btn.textContent='Send Reset Link →';
+    }
+}
+
+async function doLogin() {
+    const email = $('liEmail').value.trim(), pw = $('liPw').value;
+    if (!email||!pw) { $('liErr').textContent='Please fill in all fields.'; return; }
+    const btn = $('liBtn'); btn.disabled=true; btn.textContent='Signing in…';
+    try {
+        await window._auth.login(email, pw);
+    } catch(e) {
+        $('liErr').textContent = friendlyAuthErr(e.code);
+    } finally { btn.disabled=false; btn.textContent='Sign In →'; }
+}
+
+async function doRegister() {
+    const firstName = $('reFirstName').value.trim();
+    const lastName  = $('reLastName').value.trim();
+    const email     = $('reEmail').value.trim();
+    const pw        = $('rePw').value;
+    if (!firstName||!lastName||!email||!pw) { $('reErr').textContent='Please fill in all fields.'; return; }
+    if (pw.length < 6) { $('reErr').textContent='Password must be at least 6 characters.'; return; }
+    const displayName = firstName + ' ' + lastName;
+    const btn = $('reBtn'); btn.disabled=true; btn.textContent='Creating account…';
+    try {
+        const cred = await window._auth.register(email, pw);
+        await window._db.createProfile(cred.user.uid, {
+            displayName, firstName, lastName, bio:'', avatarBase64:null,
+            institution:'', email,
+            following:[], followers:[], followersCount:0, followingCount:0,
+            createdAt: new Date()
+        });
+    } catch(e) {
+        $('reErr').textContent = friendlyAuthErr(e.code);
+        btn.disabled=false; btn.textContent='Create Account →';
+    }
+}
+
+async function doLogout() {
+    if (confirm('Sign out of CampusLoci?')) {
+        if (msgUnsub) { msgUnsub(); msgUnsub=null; }
+        await window._auth.logout();
+    }
+}
+
+function friendlyAuthErr(code) {
+    const map = {
+        'auth/invalid-email':'Invalid email address.',
+        'auth/user-not-found':'No account found with that email.',
+        'auth/wrong-password':'Incorrect password.',
+        'auth/email-already-in-use':'An account with that email already exists.',
+        'auth/weak-password':'Password is too weak (min 6 chars).',
+        'auth/too-many-requests':'Too many attempts. Please try again later.',
+        'auth/invalid-credential':'Invalid email or password.',
+    };
+    return map[code] || 'Something went wrong. Please try again.';
+}
+
+// ────────────────────────────────────────────────────────────────
+//  SHOW AUTH vs APP
+// ────────────────────────────────────────────────────────────────
+function showAuth() {
+    $('authScreen').classList.remove('hidden');
+    $('appScreen').classList.add('hidden');
+    if (fsUnsubs) { fsUnsubs.forEach(u=>u&&u()); fsUnsubs=[]; }
+}
+
+let fsUnsubs = [];
+
+function showApp() {
+    $('authScreen').classList.add('hidden');
+    $('appScreen').classList.remove('hidden');
+    init();
+    renderHeader();
+    startListeners();
+    renderProfile();
+    renderBillboard();
+}
+
+function renderHeader() {
+    if (!myProfile) return;
+    $('hName').textContent = myProfile.displayName || 'User';
+    const av = $('hAv');
+    if (myProfile.avatarBase64) {
+        av.innerHTML = `<img src="${myProfile.avatarBase64}" alt="">`;
+    } else {
+        av.innerHTML = initials(myProfile.displayName);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  FIRESTORE LISTENERS
+// ────────────────────────────────────────────────────────────────
+function startListeners() {
+    fsUnsubs.forEach(u => u && u());
+    fsUnsubs = [];
+
+    fsUnsubs.push(
+        window._db.listenBusinesses(docs => { fsBusinesses = docs; renderBusinesses(); }),
+        window._db.listenPosts(docs => { fsPosts = docs; renderPosts(); renderProfilePosts(); }),
+        window._db.listenInbox(currentUser.uid, items => { inboxItems = items; renderInbox(); updateBadge(); }),
+        window._db.listenProfile(currentUser.uid, prof => {
+            myProfile = prof;
+            renderHeader();
+            renderProfileCard();
+        })
+    );
+}
+
+async function loadMyProfile() {
+    myProfile = await window._db.getProfile(currentUser.uid);
+    if (!myProfile) {
+        // Create profile if missing (e.g. from earlier version)
+        const name = currentUser.displayName || currentUser.email.split('@')[0];
+        await window._db.createProfile(currentUser.uid, {
+            displayName:name, bio:'', avatarBase64:null,
+            institution:'', email:currentUser.email,
+            following:[], followers:[], followersCount:0, followingCount:0,
+            createdAt: new Date()
+        });
+        myProfile = await window._db.getProfile(currentUser.uid);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  TAB SWITCHING
+// ────────────────────────────────────────────────────────────────
+function switchTab(tab) {
+    ['market','socialize','profile','about'].forEach(t => {
+        const sec = $('sec'+t.charAt(0).toUpperCase()+t.slice(1));
+        const btn = $('nav'+t.charAt(0).toUpperCase()+t.slice(1));
+        if (sec) sec.classList.toggle('hidden', t!==tab);
+        if (btn) btn.classList.toggle('active', t===tab);
+    });
+    if (tab==='profile') renderProfile();
+}
+
+function mktTab(tab) {
+    $('mkBrowse').classList.toggle('hidden', tab!=='browse');
+    $('mkList').classList.toggle('hidden',   tab!=='list');
+    $('mtBrowse').classList.toggle('active', tab==='browse');
+    $('mtList').classList.toggle('active',   tab==='list');
+}
+
+function socTab(tab) {
+    $('socFeed').classList.toggle('hidden',    tab!=='feed');
+    $('socCompose').classList.toggle('hidden', tab!=='compose');
+    $('stFeed').classList.toggle('active',    tab==='feed');
+    $('stCompose').classList.toggle('active', tab==='compose');
+}
+
+// ────────────────────────────────────────────────────────────────
+//  RENDER BUSINESSES
+// ────────────────────────────────────────────────────────────────
+function renderBusinesses() {
+    const all = [...fsBusinesses, ...SEED_BUSINESSES];
+    const filt = all.filter(b => {
+        const mI = !filterInst || b.institution===filterInst;
+        const mC = filterCat==='all' || b.category===filterCat;
+        const q  = searchQ.toLowerCase();
+        const mS = !q || b.name.toLowerCase().includes(q) || b.description.toLowerCase().includes(q);
+        return mI && mC && mS;
+    });
+
+    const grid = $('bizGrid'), noR = $('noResults');
+    if (!filt.length) { grid.innerHTML=''; noR.classList.remove('hidden'); return; }
+    noR.classList.add('hidden');
+
+    grid.innerHTML = filt.map(b => {
+        const cat  = CATS.find(c=>c.id===b.category) || CATS[0];
+        const mine = currentUser && b.ownerId===currentUser.uid;
+        return `
+        <div class="biz-card">
+            <div class="stripe"></div>
+            ${b.image ? `<img src="${b.image}" class="ci" alt="${b.name}">` : ''}
+            <div class="cb">
+                <h3>${b.name}</h3>
+                <div class="biz-own" onclick="viewProfile('${b.ownerId}','${esc(b.ownerName)}')">👤 ${b.ownerName}</div>
+                <span class="ctag">${cat.icon} ${cat.name}</span>
+                <p class="biz-desc">${b.description}</p>
+                <div class="biz-meta">
+                    <div class="bm-row"><svg class="mi" width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a2 2 0 01-2.828 0l-4.243-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>${b.location}, ${b.institution}</div>
+                    <div class="bm-row"><svg class="mi" width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>${b.availability}</div>
+                    <div class="bm-row"><svg class="mi" width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A2 2 0 013 12V7a4 4 0 014-4z"/></svg><span class="pval">${b.price}</span></div>
+                </div>
+                ${b.rating>0?`<div class="stars"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><strong>${b.rating}</strong><span style="color:var(--muted)">(${b.reviews})</span></div>`:''}
+                <div class="biz-actions">
+                    <button class="msg-btn" onclick="startBizChat('${b.fid}','${esc(b.name)}','${b.ownerId||'seed'}','${esc(b.ownerName)}')">
+                        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+                        Message
+                    </button>
+                    ${mine ? `<button class="del-btn" onclick="deleteBiz('${b.fid}','${esc(b.name)}')">🗑 Delete</button>` : ''}
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// ────────────────────────────────────────────────────────────────
+//  SUBMIT BUSINESS
+// ────────────────────────────────────────────────────────────────
+async function submitBusiness() {
+    if (!currentUser) return;
+    const g = id => $(id).value.trim();
+    const name=$('bName').value.trim(), cat=$('bCat').value,
+          inst=$('bInst').value,        desc=$('bDesc').value.trim(),
+          price=$('bPrice').value.trim(),loc=$('bLoc').value.trim(),
+          contact=$('bContact').value.trim(), avail=$('bAvail').value.trim();
+    if (!name||!inst||!desc||!price||!loc||!contact||!avail) { alert('Please fill in all required fields.'); return; }
+
+    const btn = $('submitBizBtn'); btn.disabled=true; btn.textContent='Saving…';
+    try {
+        await window._db.addBusiness({
+            name, category:cat, institution:inst, description:desc,
+            price, location:loc, contact, availability:avail,
+            ownerId:currentUser.uid, ownerName:myProfile?.displayName||'User',
+            rating:0, reviews:0, image:bizImgData||null
+        });
+        ['bName','bDesc','bPrice','bLoc','bContact','bAvail'].forEach(id => $(id).value='');
+        $('bInst').value=''; $('bImg').value=''; $('bImgPrev').innerHTML=''; bizImgData=null;
+        mktTab('browse');
+        alert('Business listed! 🎉');
+    } catch(e) { console.error(e); alert('Save failed — check Firebase config.'); }
+    finally { btn.disabled=false; btn.textContent='➕ List Business'; }
+}
+
+async function deleteBiz(fid, name) {
+    if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
+    try { await window._db.deleteBusiness(fid); }
+    catch(e) { console.error(e); alert('Delete failed.'); }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  RENDER POSTS
+// ────────────────────────────────────────────────────────────────
+function renderPosts() {
+    const filt = fsPosts.filter(p => !filterInst || p.institution===filterInst);
+    const cont = $('postsContainer'), none = $('noPosts');
+    if (!filt.length) { cont.innerHTML=''; none.classList.remove('hidden'); return; }
+    none.classList.add('hidden');
+
+    cont.innerHTML = filt.map(p => {
+        const liked   = (p.likedBy||[]).includes(currentUser?.uid);
+        const likes   = p.likeCount||0;
+        const mine    = currentUser && p.authorId===currentUser.uid;
+        const cmCount = p.commentCount||0;
+        return `
+        <div class="post-card">
+            <div class="post-head">
+                <div class="post-auth-row">
+                    <div onclick="viewProfile('${p.authorId}','${esc(p.authorName)}')">${avatar(p.authorAvatar,p.authorName)}</div>
+                    <div class="post-info">
+                        <div class="pname" onclick="viewProfile('${p.authorId}','${esc(p.authorName)}')">${p.authorName||'Student'}</div>
+                        <div class="pts">${fmtTime(p.createdAt)}</div>
+                        <div class="ploc">📍 ${p.location}, ${p.institution}</div>
+                    </div>
+                </div>
+                <span class="live-badge"><span class="ldot"></span>Live</span>
+            </div>
+            <p class="post-text">${p.content}</p>
+            ${p.image?`<img src="${p.image}" class="post-img" alt="">`:''}
+            <div class="post-actions">
+                <button class="act-btn ${liked?'liked':''}" onclick="likePost('${p.fid}',${liked})">
+                    <svg width="15" height="15" fill="${liked?'currentColor':'none'}" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/>
+                    </svg>
+                    ${likes} ${likes===1?'Like':'Likes'}
+                </button>
+                <button class="act-btn comment" onclick="openComments('${p.fid}',${cmCount})">
+                    <svg width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                    </svg>
+                    ${cmCount} ${cmCount===1?'Comment':'Comments'}
+                </button>
+                ${mine?`<button class="post-del" onclick="deletePost('${p.fid}')">🗑 Delete</button>`:''}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// ────────────────────────────────────────────────────────────────
+//  CREATE / DELETE / LIKE POST
+// ────────────────────────────────────────────────────────────────
+async function createPost() {
+    if (!currentUser) return;
+    const content=$('pContent').value.trim(), inst=$('pInst').value, loc=$('pLoc').value.trim();
+    if (!content) { alert('Write something!'); return; }
+    if (!inst)    { alert('Select your institution!'); return; }
+    if (!loc)     { alert('Add your location!'); return; }
+
+    const btn=$('shareBtn'); btn.disabled=true; btn.textContent='Sharing…';
+    try {
+        await window._db.addPost({
+            content, institution:inst, location:loc,
+            image:postImgData||null,
+            authorId:currentUser.uid,
+            authorName:myProfile?.displayName||'Student',
+            authorAvatar:myProfile?.avatarBase64||null,
+            likedBy:[], likeCount:0, commentCount:0
+        });
+        $('pContent').value=''; $('pLoc').value=''; $('pInst').value='';
+        $('pImg').value=''; $('pImgPrev').innerHTML=''; postImgData=null;
+        socTab('feed');
+    } catch(e) { console.error(e); alert('Post failed.'); }
+    finally { btn.disabled=false; btn.textContent='📤 Share Post'; }
+}
+
+async function deletePost(fid) {
+    if (!confirm('Delete this post? This cannot be undone.')) return;
+    try { await window._db.deletePost(fid); }
+    catch(e) { console.error(e); alert('Delete failed.'); }
+}
+
+async function likePost(fid, isLiked) {
+    if (!currentUser || !window._db) return;
+    try { await window._db.likePost(fid, currentUser.uid, isLiked); }
+    catch(e) { console.error(e); }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  COMMENTS
+// ────────────────────────────────────────────────────────────────
+function openComments(postId, count) {
+    openPostId = postId;
+    $('cmTitle').textContent = `Comments (${count})`;
+    $('cmList').innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted)">Loading…</div>';
+    $('commentsModal').classList.remove('hidden');
+
+    if (cmUnsub) { cmUnsub(); cmUnsub=null; }
+    cmUnsub = window._db.listenComments(postId, comments => {
+        $('cmTitle').textContent = `Comments (${comments.length})`;
+        if (!comments.length) {
+            $('cmList').innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);font-size:.88rem">No comments yet. Be the first!</div>';
+            return;
+        }
+        $('cmList').innerHTML = comments.map(c => `
+        <div class="cm-item">
+            ${avatar(c.authorAvatar, c.authorName)}
+            <div class="cm-bubble">
+                <div class="cm-author" onclick="viewProfile('${c.authorId}','${esc(c.authorName)}')">${c.authorName}</div>
+                <div class="cm-text">${c.text}</div>
+                <div class="cm-ts">${fmtTime(c.createdAt)}</div>
+            </div>
+        </div>`).join('');
+        $('cmList').scrollTop = $('cmList').scrollHeight;
+    });
+}
+
+function closeComments() {
+    $('commentsModal').classList.add('hidden');
+    if (cmUnsub) { cmUnsub(); cmUnsub=null; }
+    openPostId = null;
+}
+
+async function addComment() {
+    if (!currentUser || !openPostId) return;
+    const text = $('cmInput').value.trim();
+    if (!text) return;
+    $('cmInput').value = '';
+    try {
+        await window._db.addComment(openPostId, {
+            authorId:currentUser.uid,
+            authorName:myProfile?.displayName||'Student',
+            authorAvatar:myProfile?.avatarBase64||null,
+            text
+        });
+        await window._db.incCommentCount(openPostId);
+    } catch(e) { console.error(e); }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  PROFILE — OWN
+// ────────────────────────────────────────────────────────────────
+function renderProfile() {
+    renderProfileCard();
+    renderProfilePosts();
+    renderProfileBusiness();
+}
+
+function renderProfileCard() {
+    if (!myProfile) return;
+    const p = myProfile;
+    const isEditing = editingProfile;
+
+    $('profCard').innerHTML = isEditing ? `
+    <div class="edit-prof-form">
+        <h3>✏️ Edit Profile</h3>
+        <div class="fg2">
+            <div class="fg"><label>Display Name</label><input type="text" id="epName" value="${esc(p.displayName||'')}"></div>
+            <div class="fg"><label>Institution</label>
+                <select id="epInst">${['',  ...INSTITUTIONS].map(i=>`<option value="${i}" ${p.institution===i?'selected':''}>${i||'Select institution'}</option>`).join('')}</select>
+            </div>
+            <div class="fg full"><label>Bio</label><textarea id="epBio" rows="3">${p.bio||''}</textarea></div>
+            <div class="fg"><label>Profile Picture</label><input type="file" id="epImg" accept="image/*"></div>
+        </div>
+        <div class="factions">
+            <button class="btn-p" onclick="saveProfile()">Save Changes</button>
+            <button class="btn-s" onclick="editingProfile=false;renderProfileCard()">Cancel</button>
+        </div>
+    </div>` : `
+    <div class="prof-header">
+        ${avatar(p.avatarBase64, p.displayName, 'av-lg')}
+        <div class="prof-info">
+            <div class="prof-name">${p.displayName||'Student'}</div>
+            ${p.bio?`<div class="prof-bio">${p.bio}</div>`:''}
+            ${p.institution?`<div class="prof-inst">🎓 ${p.institution}</div>`:''}
+            <div class="prof-stats">
+                <div class="pstat"><strong>${p.followersCount||0}</strong><span>Followers</span></div>
+                <div class="pstat"><strong>${p.followingCount||0}</strong><span>Following</span></div>
+                <div class="pstat"><strong>${fsPosts.filter(pp=>pp.authorId===currentUser.uid).length}</strong><span>Posts</span></div>
+            </div>
+            <div class="prof-actions">
+                <button class="btn-p" onclick="editingProfile=true;renderProfileCard()">✏️ Edit Profile</button>
+            </div>
+            <div class="mobile-logout-row">
+                <button class="mobile-logout-btn" onclick="doLogout()">Sign Out</button>
+            </div>
+        </div>
+    </div>`;
+}
+
+async function saveProfile() {
+    const name  = $('epName').value.trim();
+    const bio   = $('epBio').value.trim();
+    const inst  = $('epInst').value;
+    const file  = $('epImg').files[0];
+
+    if (!name) { alert('Display name is required.'); return; }
+
+    let avatarBase64 = myProfile.avatarBase64 || null;
+    if (file) avatarBase64 = await compressImg(file, 200, 200, 0.8);
+
+    try {
+        await window._db.updateProfile(currentUser.uid, {displayName:name, bio, institution:inst, avatarBase64});
+        editingProfile = false;
+    } catch(e) { console.error(e); alert('Save failed.'); }
+}
+
+function profTab(tab) {
+    $('profPosts').classList.toggle('hidden', tab!=='posts');
+    $('profBusiness').classList.toggle('hidden', tab!=='business');
+    $('ptPosts').classList.toggle('active', tab==='posts');
+    $('ptBusiness').classList.toggle('active', tab==='business');
+}
+
+function renderProfilePosts() {
+    if (!currentUser) return;
+    const mine = fsPosts.filter(p => p.authorId===currentUser.uid);
+    if (!mine.length) {
+        $('profPosts').innerHTML = '<div class="empty"><div class="emo">📝</div><h3>No posts yet</h3><p>Share your first campus moment!</p></div>';
+        return;
+    }
+    $('profPosts').innerHTML = mine.map(p => `
+    <div class="post-card">
+        <div class="post-head">
+            <div class="post-info">
+                <div class="pts">${fmtTime(p.createdAt)}</div>
+                <div class="ploc">📍 ${p.location}, ${p.institution}</div>
+            </div>
+            <button class="post-del" onclick="deletePost('${p.fid}')">🗑 Delete</button>
+        </div>
+        <p class="post-text">${p.content}</p>
+        ${p.image?`<img src="${p.image}" class="post-img" alt="">`:''}
+        <div class="post-actions">
+            <span class="act-btn" style="cursor:default">❤️ ${p.likeCount||0}</span>
+            <span class="act-btn" style="cursor:default">💬 ${p.commentCount||0}</span>
+        </div>
+    </div>`).join('');
+}
+
+function renderProfileBusiness() {
+    if (!currentUser) return;
+    const mine = [...SEED_BUSINESSES,...fsBusinesses].filter(b => b.ownerId===currentUser.uid);
+    if (!mine.length) {
+        $('profBusiness').innerHTML = '<div class="empty"><div class="emo">🏪</div><h3>No businesses listed</h3><p>List your first business in the Market!</p></div>';
+        return;
+    }
+    $('profBusiness').innerHTML = mine.map(b => {
+        const cat = CATS.find(c=>c.id===b.category)||CATS[0];
+        return `
+        <div class="biz-card" style="margin-bottom:14px">
+            <div class="stripe"></div>
+            <div class="cb">
+                <h3>${b.name}</h3>
+                <span class="ctag">${cat.icon} ${cat.name}</span>
+                <p class="biz-desc">${b.description}</p>
+                <div class="biz-actions">
+                    <button class="del-btn" onclick="deleteBiz('${b.fid}','${esc(b.name)}')">🗑 Delete Listing</button>
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// ────────────────────────────────────────────────────────────────
+//  VIEW ANOTHER USER'S PROFILE
+// ────────────────────────────────────────────────────────────────
+async function viewProfile(uid, fallbackName) {
+    if (!uid || uid==='seed' || uid.startsWith('seed')) return;
+    if (currentUser && uid===currentUser.uid) { switchTab('profile'); return; }
+
+    $('pmContent').innerHTML = `<div style="text-align:center;padding:30px;color:var(--muted)">Loading profile…</div>`;
+    $('profileModal').classList.remove('hidden');
+
+    const profile = await window._db.getProfile(uid);
+    if (!profile) {
+        $('pmContent').innerHTML = `<div style="text-align:center;padding:30px;color:var(--muted)">Profile not found.</div>`;
+        return;
+    }
+
+    const isFollowing = (myProfile?.following||[]).includes(uid);
+    const theirPosts  = fsPosts.filter(p=>p.authorId===uid).slice(0,5);
+
+    $('pmContent').innerHTML = `
+    <div class="pm-top">
+        ${avatar(profile.avatarBase64, profile.displayName, 'av-lg')}
+        <div class="pm-info">
+            <div class="pm-name">${profile.displayName||fallbackName||'Student'}</div>
+            ${profile.institution?`<div class="pm-inst">🎓 ${profile.institution}</div>`:''}
+            ${profile.bio?`<div class="pm-bio">${profile.bio}</div>`:''}
+            <div class="pm-stats">
+                <div class="pstat"><strong>${profile.followersCount||0}</strong><span>Followers</span></div>
+                <div class="pstat"><strong>${profile.followingCount||0}</strong><span>Following</span></div>
+            </div>
+            <div class="pm-actions">
+                <button class="follow-btn ${isFollowing?'following':'not-following'}" id="followBtn"
+                    onclick="toggleFollow('${uid}')">
+                    ${isFollowing?'✓ Following':'+ Follow'}
+                </button>
+                <button class="btn-p" style="padding:9px 16px;font-size:.82rem"
+                    onclick="startUserChat('${uid}','${esc(profile.displayName||fallbackName||'User')}')">
+                    💬 Message
+                </button>
+                <button class="btn-s" style="padding:9px 12px;font-size:.82rem" onclick="closeProfileModal()">✕</button>
+            </div>
+        </div>
+    </div>
+    ${theirPosts.length?`
+    <div class="pm-posts">
+        <h4>RECENT POSTS</h4>
+        ${theirPosts.map(p=>`
+        <div style="background:var(--surf2);border:1px solid var(--brd);border-radius:10px;padding:12px;margin-bottom:8px">
+            <p style="font-size:.88rem;color:var(--ink2);line-height:1.6;margin-bottom:6px">${p.content}</p>
+            <div style="font-size:.75rem;color:var(--muted)">📍 ${p.location} · ${fmtTime(p.createdAt)}</div>
+        </div>`).join('')}
+    </div>`:''}`;
+}
+
+function closeProfileModal() {
+    $('profileModal').classList.add('hidden');
+}
+
+async function toggleFollow(uid) {
+    if (!currentUser || !myProfile) return;
+    const isFollowing = (myProfile.following||[]).includes(uid);
+    const btn = $('followBtn');
+    btn.disabled = true;
+    try {
+        if (isFollowing) {
+            await window._db.unfollow(currentUser.uid, uid);
+        } else {
+            await window._db.follow(currentUser.uid, uid);
+        }
+        // Refresh modal
+        viewProfile(uid, '');
+    } catch(e) { console.error(e); btn.disabled=false; }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  CHAT — INBOX
+// ────────────────────────────────────────────────────────────────
+function openInbox() {
+    const ov=$('chatOverlay'), dr=$('chatDrawer');
+    ov.classList.add('open');
+    requestAnimationFrame(()=>{ ov.classList.add('vis'); dr.classList.add('open'); });
+}
+function closeInbox() {
+    const ov=$('chatOverlay'), dr=$('chatDrawer');
+    ov.classList.remove('vis'); dr.classList.remove('open');
+    setTimeout(()=>ov.classList.remove('open'),300);
+}
+
+function updateBadge() {
+    const badge = $('inboxBadge');
+    if (inboxItems.length) { badge.style.display='flex'; badge.textContent=inboxItems.length; }
+    else badge.style.display='none';
+}
+
+function renderInbox() {
+    const list = $('inboxList');
+    if (!inboxItems.length) {
+        list.innerHTML='<div class="inbox-empty">No conversations yet.<br>Message a business or a student to begin.</div>';
+        return;
+    }
+    list.innerHTML = inboxItems.map(item => {
+        const myId = currentUser.uid;
+        let displayName = '';
+        if (item.type==='business') {
+            // Show biz name to customer, customer name to owner
+            if (Object.keys(item.names||{}).find(k=>k===myId && k!==myId)) {
+                displayName = item.bizName || 'Business';
+            } else {
+                const otherKey = Object.keys(item.names||{}).find(k=>k!==myId);
+                displayName = (item.names?.[myId]===myProfile?.displayName)
+                    ? item.bizName || 'Business'
+                    : (item.names?.[otherKey] || 'Business');
+                displayName = item.bizName || 'Business';
+            }
+        } else {
+            const otherKey = (item.participants||[]).find(k=>k!==myId);
+            displayName = item.names?.[otherKey] || 'Student';
+        }
+        return `
+        <div class="ibitem ${item.id===activeChatId?'active':''}" data-cid="${item.id}"
+            onclick="loadConversation('${item.id}','${esc(displayName)}','${item.type}')">
+            <div class="ib-name">💬 ${displayName}</div>
+            <div class="ib-last">${item.lastMessage||'No messages yet'}</div>
+        </div>`;
+    }).join('');
+}
+
+function loadConversation(chatId, displayName, type) {
+    activeChatId = chatId;
+    document.querySelectorAll('.ibitem').forEach(el=>el.classList.toggle('active',el.dataset.cid===chatId));
+
+    $('convPh').classList.add('hidden');
+    $('convHead').classList.remove('hidden');
+    $('msgsArea').classList.remove('hidden');
+    $('chatInputBar').classList.remove('hidden');
+    $('convName').textContent = displayName;
+    $('convSub').textContent = type==='business' ? 'Business Chat' : 'Direct Message';
+
+    if (msgUnsub) { msgUnsub(); msgUnsub=null; }
+    $('msgsArea').innerHTML='';
+
+    msgUnsub = window._db.listenMessages(chatId, msgs => {
+        const area = $('msgsArea');
+        area.innerHTML = msgs.map(m => {
+            const mine = m.senderId===currentUser.uid;
+            return `<div class="mrow ${mine?'mine':''}">
+                <div class="bubble ${mine?'mine':'theirs'}">
+                    ${!mine?`<strong style="font-size:.7rem;display:block;margin-bottom:2px;opacity:.65">${m.senderName}</strong>`:''}
+                    ${m.text}
+                    <span class="mt">${fmtTimeSm(m.createdAt)}</span>
+                </div>
+            </div>`;
+        }).join('');
+        area.scrollTop = area.scrollHeight;
+    });
+
+    $('chatInput').focus();
+}
+
+async function startBizChat(bizId, bizName, ownerId, ownerName) {
+    if (!currentUser) return;
+    if (!window._db) { alert('Firebase not configured.'); return; }
+    try {
+        const cid = await window._db.getOrCreateBizChat(
+            currentUser.uid, myProfile?.displayName||'Student',
+            bizId, bizName, ownerId, ownerName
+        );
+        openInbox();
+        setTimeout(()=>loadConversation(cid, bizName, 'business'), 350);
+    } catch(e) { console.error(e); alert('Could not open chat.'); }
+}
+
+async function startUserChat(uid, name) {
+    if (!currentUser || uid===currentUser.uid) return;
+    closeProfileModal();
+    try {
+        const cid = await window._db.getOrCreateUserChat(
+            currentUser.uid, myProfile?.displayName||'Student',
+            uid, name
+        );
+        openInbox();
+        setTimeout(()=>loadConversation(cid, name, 'user'), 350);
+    } catch(e) { console.error(e); alert('Could not open chat.'); }
+}
+
+async function sendMsg() {
+    if (!activeChatId || !currentUser) return;
+    const input=$('chatInput'), text=input.value.trim();
+    if (!text) return;
+    input.value='';
+    try { await window._db.sendMessage(activeChatId, currentUser.uid, myProfile?.displayName||'Student', text); }
+    catch(e) { console.error('Send failed',e); }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  BILLBOARD
+// ────────────────────────────────────────────────────────────────
+let bbIndex   = 0;   // current active slide index
+let bbTimer   = null; // auto-rotate interval handle
+
+function renderBillboard() {
+    const wrap = $('billboardWrap');
+    const dots = $('bbDots');
+    if (!wrap || !dots) return;
+
+    // No ads — hide the whole wrap
+    if (!BILLBOARDS.length) {
+        wrap.classList.add('bb-empty');
+        return;
+    }
+    wrap.classList.remove('bb-empty');
+
+    // Build slides (insert before the arrow buttons which are already in DOM)
+    // Remove any old slides first
+    wrap.querySelectorAll('.billboard-slide').forEach(el => el.remove());
+    dots.innerHTML = '';
+
+    BILLBOARDS.forEach((ad, i) => {
+        // Slide element — outer anchor so whole card is clickable
+        const slide = document.createElement('a');
+        slide.className  = 'billboard-slide' + (i === 0 ? ' active' : '');
+        slide.href       = ad.link || '#';
+        slide.target     = '_blank';
+        slide.rel        = 'noopener noreferrer';
+        slide.innerHTML  = `
+            <img class="bb-img" src="${ad.image}" alt="${ad.name}" loading="lazy">
+            <div class="bb-overlay"></div>
+            <div class="bb-content">
+                <div class="bb-sponsor">Sponsored</div>
+                <div class="bb-name">${ad.name}</div>
+                <div class="bb-tagline">${ad.tagline}</div>
+                <div class="bb-cta">
+                    <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                    </svg>
+                    ${ad.cta}
+                </div>
+            </div>`;
+        // Insert before the first arrow button
+        const firstArrow = wrap.querySelector('.bb-arrow');
+        wrap.insertBefore(slide, firstArrow);
+
+        // Dot
+        const dot = document.createElement('button');
+        dot.className   = 'bb-dot' + (i === 0 ? ' active' : '');
+        dot.setAttribute('aria-label', `Ad ${i + 1}`);
+        dot.onclick     = (e) => { e.preventDefault(); bbGoTo(i); };
+        dots.appendChild(dot);
+    });
+
+    bbIndex = 0;
+    bbStartTimer();
+}
+
+function bbGoTo(index) {
+    const slides = document.querySelectorAll('.billboard-slide');
+    const dots   = document.querySelectorAll('.bb-dot');
+    if (!slides.length) return;
+
+    // Wrap around
+    bbIndex = ((index % slides.length) + slides.length) % slides.length;
+
+    slides.forEach((s, i) => s.classList.toggle('active', i === bbIndex));
+    dots.forEach((d, i)   => d.classList.toggle('active', i === bbIndex));
+}
+
+function bbNav(direction) {
+    bbGoTo(bbIndex + direction);
+    // Reset auto-timer on manual navigation
+    bbStartTimer();
+}
+
+function bbStartTimer() {
+    if (bbTimer) clearInterval(bbTimer);
+    if (BILLBOARDS.length > 1) {
+        bbTimer = setInterval(() => bbGoTo(bbIndex + 1), 5000); // rotate every 5 s
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  UTILITIES
+// ────────────────────────────────────────────────────────────────
+function esc(str) { return (str||'').replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
+
+function syncMobileInst(val) {
+    filterInst = val;
+    const desk = $('instFilter');
+    if (desk) desk.value = val;
+    renderBusinesses(); renderPosts();
+}
+
+function syncMobileInstSoc(val) {
+    filterInst = val;
+    const desk = $('instFilter');
+    if (desk) desk.value = val;
+    const mktMob = $('instFilterMobile');
+    if (mktMob) mktMob.value = val;
+    renderPosts();
+}
+
+</script>
+</body>
+</html>
