@@ -17,7 +17,7 @@ import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, limit,
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const cfg = {
-      apiKey: "AIzaSyCGgERZ76huGhOy6D6xlY8055ysFKAQ2TQ",
+    apiKey: "AIzaSyCGgERZ76huGhOy6D6xlY8055ysFKAQ2TQ",
   authDomain: "campusapp-b87ce.firebaseapp.com",
   projectId: "campusapp-b87ce",
   storageBucket: "campusapp-b87ce.firebasestorage.app",
@@ -404,13 +404,6 @@ header{
 .post-info .pname:hover{color:var(--blue)}
 .post-info .pts{font-size:.75rem;color:var(--muted)}
 .post-info .ploc{font-size:.75rem;color:var(--blue);margin-top:2px;font-weight:500}
-.live-badge{
-    display:inline-flex;align-items:center;gap:4px;
-    background:var(--pink-pl);color:var(--pink-dk);font-size:.7rem;font-weight:700;
-    padding:3px 9px;border-radius:99px;border:1px solid #fbcfe8;white-space:nowrap;
-}
-.ldot{width:5px;height:5px;background:var(--pink);border-radius:50%;animation:pulse 1.4s ease infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.2}}
 .post-text{font-size:.9rem;line-height:1.65;color:var(--ink2);margin-bottom:11px}
 .post-img{width:100%;border-radius:10px;margin-bottom:11px}
 .post-actions{display:flex;gap:16px;padding-top:11px;border-top:1px solid var(--brd);align-items:center}
@@ -1775,7 +1768,6 @@ function renderPosts() {
                         <div class="ploc">📍 ${p.location}, ${p.institution}</div>
                     </div>
                 </div>
-                <span class="live-badge"><span class="ldot"></span>Live</span>
             </div>
             <p class="post-text">${p.content}</p>
             ${p.image?`<img src="${p.image}" class="post-img" alt="">`:''}
